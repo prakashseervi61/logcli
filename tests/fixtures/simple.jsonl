@@ -1,0 +1,4 @@
+{"timestamp":"2026-10-28T10:00:00Z","level":"info","message":"server started","component":"api"}
+{"timestamp":"2026-10-28T10:00:01.250Z","level":"warn","message":"slow request","component":"api","duration":1.75,"request":{"method":"GET","path":"/users"}}
+{"timestamp":1793181602,"level":"error","message":"connection refused","component":"db","status":500,"request":{"method":"POST","path":"/orders"}}
+{"timestamp":"2026-10-28T10:00:03Z","level":"debug","message":"cache hit","component":"api","cached":true}

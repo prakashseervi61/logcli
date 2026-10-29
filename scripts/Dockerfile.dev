@@ -1,0 +1,6 @@
+# Development toolchain: the official slim Rust image plus formatting and linting.
+# Build once (the helper scripts do this automatically):
+#   docker build -f scripts/Dockerfile.dev -t logcli-rust:dev .
+FROM rust:1-slim
+
+RUN rustup component add rustfmt clippy

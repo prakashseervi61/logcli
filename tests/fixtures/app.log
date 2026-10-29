@@ -1,0 +1,2 @@
+time=2026-10-28T10:00:00Z level=info msg="server started" service=api
+time=2026-10-28T10:00:01Z level=error msg="boom" service=db status=500

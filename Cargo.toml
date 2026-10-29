@@ -1,0 +1,24 @@
+[package]
+name = "logcli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Fast, local-first log viewer and processor for JSON and logfmt logs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+regex = "1"
+memchr = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

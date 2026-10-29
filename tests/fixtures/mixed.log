@@ -1,0 +1,3 @@
+{"timestamp":"2026-10-28T10:00:00Z","level":"info","message":"json line"}
+time=2026-10-28T10:00:01Z level=warn msg="logfmt line"
+plain text line
