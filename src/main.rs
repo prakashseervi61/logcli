@@ -7,6 +7,7 @@ mod model;
 mod output;
 mod parser;
 mod query;
+mod tui;
 
 use clap::Parser;
 

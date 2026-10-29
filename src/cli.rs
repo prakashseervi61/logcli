@@ -140,7 +140,11 @@ pub struct Args {
     #[arg(short = 's', long = "sort")]
     pub sort: bool,
 
-    /// Follow input files (not implemented yet)
+    /// Launch the interactive TUI dashboard
+    #[arg(long = "tui")]
+    pub tui: bool,
+
+    /// Follow input files (not implemented yet in batch mode; used by TUI)
     #[arg(short = 'F', long = "follow")]
     pub follow: bool,
 

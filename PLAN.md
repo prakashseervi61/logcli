@@ -163,6 +163,17 @@ submodules rather than growing the existing files past their current responsibil
 - [x] QUERY_SPEC test matrix and unit tests green (27 new integration tests)
 - **Exit:** QUERY_SPEC §10 examples and test matrix pass.
 
+### Phase 3.5 — Interactive TUI (completed)
+- [x] TUI scaffolding (ratatui + crossterm)
+- [x] Log list view with color-coded levels
+- [x] Scrollable entry list (j/k, g/G)
+- [x] Query filter prompt (/ or f)
+- [x] Details view (d/Enter)
+- [x] Follow mode toggle (F) with live file re-reading
+- [x] Help screen (?)
+- [x] 11 TUI unit tests
+- **Exit:** `--tui` launches and operates correctly; all unit tests pass.
+
 ### Phase 4 — Output & UX (Week 4)
 - [ ] Theme engine (`@base` + overlays), built-in themes
 - [ ] Expansion modes, hiding, flattening, empty-field rules

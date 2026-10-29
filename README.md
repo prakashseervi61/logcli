@@ -2,11 +2,10 @@
 
 Fast, local-first log viewer and processor for **JSON** and **logfmt** logs — inspired by [hl](https://github.com/pamburus/hl).
 
-> **Status:** v0.2. Query language implemented. JSON/logfmt/plain parsing, field/level/time filtering,
-> formatted and raw output, gzip input, in-memory sorting, and the full `-q` boolean query language work and
-> are covered by tests.
-> Follow mode (`-F`), pager, themes, and index-backed sorting are **not implemented** in this build; those
-> flags fail with a clear error instead of being silently ignored.
+> **Status:** v0.2. Query language and interactive TUI implemented. JSON/logfmt/plain parsing, field/level/time
+> filtering, formatted and raw output, gzip input, in-memory sorting, the full `-q` boolean query language, and
+> the `--tui` interactive dashboard work and are covered by tests.
+> Pager, themes, zstd/bzip2/xz, and index-backed sorting are **not implemented** in this build.
 
 ## Why
 
@@ -34,9 +33,11 @@ Implemented in v0.2.0:
   `--max-entry-size` guard.
 - **Sorting:** `-s` chronological merge across files (in-memory).
 - **Errors:** deterministic exit codes (`0` success, `1` usage/query, `2` I/O, `3` broken pipe, `130` interrupted).
+- **Interactive TUI:** `--tui` launches a full-screen dashboard with scrollable log list, color-coded levels,
+  live query filtering (`/`), details view (`d`), follow mode toggle (`F`), and help (`?`).
 
-Planned but not in this build: `-F` follow mode, pager integration, themes, zstd/bzip2/xz, and index-backed
-external sorting. See [PLAN.md](PLAN.md).
+Planned but not in this build: pager integration, themes, zstd/bzip2/xz, and index-backed external sorting.
+See [PLAN.md](PLAN.md).
 
 ## Quick start
 
@@ -67,6 +68,28 @@ logcli -r -f component=tsdb app.log | grep foo
 
 # Read from stdin
 kubectl logs deploy/api | logcli -P -l warn
+```
+
+# Interactive TUI dashboard
+```powershell
+# Launch the TUI on a log file
+logcli --tui backend/logs/api.log
+
+# TUI with follow mode (watch for new lines)
+logcli --tui --follow backend/logs/api.log
+
+# TUI with pre-filter
+logcli --tui -q 'level = error' backend/logs/api.log
+```
+
+In the TUI:
+- `j`/`k` — scroll up/down
+- `g`/`G` — go to top/bottom
+- `/` or `f` — open filter prompt
+- `d`/`Enter` — open details view
+- `F` — toggle follow mode
+- `?` — show help
+- `q` — quit
 ```
 
 ## Installation

@@ -7,55 +7,20 @@ use crate::output::{self, ColorMode, Expansion, FormatOptions, Formatter, Output
 use crate::query;
 use chrono::{DateTime, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 pub fn run(args: Args) -> Result<(), Error> {
+    if args.tui {
+        return crate::tui::run(args);
+    }
+
     if args.follow {
         return Err(Error::usage(
-            "follow mode (-F) is not implemented in this build",
+            "follow mode (-F) is not implemented in batch mode; use --tui for interactive follow",
         ));
     }
 
-    validate_input_format(&args.input_format)?;
-
-    let mut exprs = args
-        .filters
-        .iter()
-        .map(|raw| query::parse_filter(raw))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for raw in &args.queries {
-        let expr =
-            query::parse(raw).map_err(|error| Error::query(query::format_error(raw, &error)))?;
-        exprs.push(expr);
-    }
-
-    let logs_from_stdin = args.files.is_empty()
-        || args
-            .files
-            .iter()
-            .any(|path| path == std::path::Path::new("-"));
-    query::resolve_sets(&mut exprs, logs_from_stdin)?;
-
-    let min_level = match &args.level {
-        Some(text) => Some(
-            Level::parse(text).ok_or_else(|| Error::usage(format!("invalid level '{text}'")))?,
-        ),
-        None => None,
-    };
-
-    let now = Utc::now();
-    let since = args
-        .since
-        .as_deref()
-        .map(|text| parse_time(text, now))
-        .transpose()?;
-    let until = args
-        .until
-        .as_deref()
-        .map(|text| parse_time(text, now))
-        .transpose()?;
-
-    let filters = Filters::new(min_level, since, until, exprs);
+    let entries = load_entries(&args)?;
 
     let expansion = Expansion::parse(&args.expansion)?;
     let timezone = OutputTz::parse(args.time_zone.as_deref(), args.local)?;
@@ -92,6 +57,76 @@ pub fn run(args: Args) -> Result<(), Error> {
         trailing,
     })?;
 
+    let mut writer = output::open_output(args.output.as_deref())?;
+
+    let mut sorted = entries;
+    if args.sort {
+        sorted.sort_by(
+            |left, right| match (left.timestamp.as_ref(), right.timestamp.as_ref()) {
+                (Some(left), Some(right)) => left.cmp(right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+        );
+    }
+
+    for entry in &sorted {
+        formatter.write(entry, writer.as_mut())?;
+    }
+
+    writer.flush()?;
+
+    if args.verbose && !args.silent {
+        let total = sorted.len() as u64;
+        eprintln!("logcli: {total} entries matched");
+    }
+
+    Ok(())
+}
+
+/// Load and filter all entries from the given args, returning them in file order.
+pub fn load_entries(args: &Args) -> Result<Vec<Entry>, Error> {
+    validate_input_format(&args.input_format)?;
+
+    let mut exprs = args
+        .filters
+        .iter()
+        .map(|raw| query::parse_filter(raw))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for raw in &args.queries {
+        let expr =
+            query::parse(raw).map_err(|error| Error::query(query::format_error(raw, &error)))?;
+        exprs.push(expr);
+    }
+
+    let logs_from_stdin =
+        args.files.is_empty() || args.files.iter().any(|path| path == Path::new("-"));
+    query::resolve_sets(&mut exprs, logs_from_stdin)?;
+
+    let min_level = match &args.level {
+        Some(text) => Some(
+            Level::parse(text).ok_or_else(|| Error::usage(format!("invalid level '{text}'")))?,
+        ),
+        None => None,
+    };
+
+    let now = Utc::now();
+    let since = args
+        .since
+        .as_deref()
+        .map(|text| parse_time(text, now))
+        .transpose()?;
+    let until = args
+        .until
+        .as_deref()
+        .map(|text| parse_time(text, now))
+        .transpose()?;
+
+    let filters = Filters::new(min_level, since, until, exprs);
+
+    let sources = input::open_sources(&args.files)?;
     let max_entry_size = parse_size(&args.max_entry_size).ok_or_else(|| {
         Error::usage(format!(
             "invalid maximum entry size '{}'",
@@ -99,14 +134,10 @@ pub fn run(args: Args) -> Result<(), Error> {
         ))
     })?;
 
-    let sources = input::open_sources(&args.files)?;
-    let mut writer = output::open_output(args.output.as_deref())?;
-
+    let mut entries: Vec<Entry> = Vec::new();
     let mut total = 0u64;
-    let mut matched = 0u64;
     let mut invalid = 0u64;
     let mut oversized = 0u64;
-    let mut sorted: Vec<Entry> = Vec::new();
 
     for mut source in sources {
         let delimiter = input::detect_delimiter(source.reader.as_mut(), &args.delimiter)?;
@@ -163,40 +194,18 @@ pub fn run(args: Args) -> Result<(), Error> {
                 continue;
             }
 
-            matched += 1;
-
-            if args.sort {
-                sorted.push(entry);
-            } else {
-                formatter.write(&entry, writer.as_mut())?;
-            }
+            entries.push(entry);
         }
     }
-
-    if args.sort {
-        sorted.sort_by(
-            |left, right| match (left.timestamp.as_ref(), right.timestamp.as_ref()) {
-                (Some(left), Some(right)) => left.cmp(right),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            },
-        );
-
-        for entry in &sorted {
-            formatter.write(entry, writer.as_mut())?;
-        }
-    }
-
-    writer.flush()?;
 
     if args.verbose && !args.silent {
+        let matched = entries.len() as u64;
         eprintln!(
             "logcli: {total} entries read, {matched} matched, {invalid} invalid, {oversized} oversized"
         );
     }
 
-    Ok(())
+    Ok(entries)
 }
 
 fn validate_input_format(format: &str) -> Result<(), Error> {
@@ -322,7 +331,6 @@ fn parse_size(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn parses_sizes() {

@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ## [Unreleased]
 
 ### Added
-- **v0.2.0 query language implementation** (Rust):
+- **v0.2.0 query language + TUI implementation** (Rust):
   - `-q/--query` boolean query language per `docs/QUERY_SPEC.md`: lexer with byte offsets,
     parser with `or`/`and`/`not`/parentheses precedence, comparisons with aliases (`eq`, `ne`, `gt`, `ge`,
     `lt`, `le`, `contain`, `match`), `in (...)`, `like`/`not like`, `exists(...)`, absent-field `?` modifier,
@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   - Caret-positioned query error messages per `docs/CLI_SPEC.md` §11; invalid regexes report the pattern.
   - 27 integration tests plus query unit tests covering the `docs/QUERY_SPEC.md` §10 example matrix and §11 test
     matrix.
+  - Interactive TUI dashboard (`--tui`): scrollable log list with color-coded levels, live query filtering,
+    details view, follow mode toggle, help screen. 11 TUI unit tests.
 - **v0.1.0 MVP implementation** (Rust):
   - JSON/JSONL, logfmt, and plain-text parsing with per-line auto-detection and `--allow-prefix`.
   - gzip input by magic bytes (multi-member gzip supported); LF/CRLF/CR/NUL delimiters.
