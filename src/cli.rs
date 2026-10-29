@@ -34,7 +34,7 @@ pub struct Args {
     #[arg(short = 'f', long = "filter", value_name = "EXPR")]
     pub filters: Vec<String>,
 
-    /// Filter using a query expression (not implemented yet)
+    /// Filter using a boolean query expression (repeatable; multiple are ANDed)
     #[arg(short = 'q', long = "query", value_name = "EXPR")]
     pub queries: Vec<String>,
 

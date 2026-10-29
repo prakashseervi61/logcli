@@ -155,12 +155,13 @@ submodules rather than growing the existing files past their current responsibil
 - **Exit:** parsing and filter examples covered by tests.
 - [ ] Add wildcard operators and the QUERY_SPEC §10 matrix as dedicated tests
 
-### Phase 3 — Query Language (Week 3)
-- [ ] Lexer, parser (EBNF in QUERY_SPEC), AST
-- [ ] Evaluator with coercion rules, arrays, `in`, `exists`
-- [ ] Caret-positioned error messages
-- [ ] Cost-based term ordering; regex compilation
-- **Exit:** QUERY_SPEC test matrix green; fuzz target for the parser.
+### Phase 3 — Query Language (v0.2 — completed)
+- [x] Lexer, parser (EBNF in QUERY_SPEC), AST
+- [x] Evaluator with coercion rules, arrays, `in`, `exists`, absent modifier `?`, value sets (`@file`, `@-`)
+- [x] Caret-positioned error messages
+- [x] Cost-based term ordering; regex compilation
+- [x] QUERY_SPEC test matrix and unit tests green (27 new integration tests)
+- **Exit:** QUERY_SPEC §10 examples and test matrix pass.
 
 ### Phase 4 — Output & UX (Week 4)
 - [ ] Theme engine (`@base` + overlays), built-in themes

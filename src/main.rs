@@ -6,6 +6,7 @@ mod input;
 mod model;
 mod output;
 mod parser;
+mod query;
 
 use clap::Parser;
 

@@ -4,6 +4,7 @@ use crate::filter::Filters;
 use crate::input;
 use crate::model::{Entry, Level};
 use crate::output::{self, ColorMode, Expansion, FormatOptions, Formatter, OutputTz};
+use crate::query;
 use chrono::{DateTime, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use std::io::{BufRead, Write};
 
@@ -14,13 +15,26 @@ pub fn run(args: Args) -> Result<(), Error> {
         ));
     }
 
-    if !args.queries.is_empty() {
-        return Err(Error::usage(
-            "query expressions (-q) are not implemented in this build; use -f for field filters",
-        ));
+    validate_input_format(&args.input_format)?;
+
+    let mut exprs = args
+        .filters
+        .iter()
+        .map(|raw| query::parse_filter(raw))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for raw in &args.queries {
+        let expr =
+            query::parse(raw).map_err(|error| Error::query(query::format_error(raw, &error)))?;
+        exprs.push(expr);
     }
 
-    validate_input_format(&args.input_format)?;
+    let logs_from_stdin = args.files.is_empty()
+        || args
+            .files
+            .iter()
+            .any(|path| path == std::path::Path::new("-"));
+    query::resolve_sets(&mut exprs, logs_from_stdin)?;
 
     let min_level = match &args.level {
         Some(text) => Some(
@@ -41,7 +55,7 @@ pub fn run(args: Args) -> Result<(), Error> {
         .map(|text| parse_time(text, now))
         .transpose()?;
 
-    let filters = Filters::new(min_level, since, until, &args.filters)?;
+    let filters = Filters::new(min_level, since, until, exprs);
 
     let expansion = Expansion::parse(&args.expansion)?;
     let timezone = OutputTz::parse(args.time_zone.as_deref(), args.local)?;

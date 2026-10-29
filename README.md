@@ -2,10 +2,11 @@
 
 Fast, local-first log viewer and processor for **JSON** and **logfmt** logs — inspired by [hl](https://github.com/pamburus/hl).
 
-> **Status:** v0.1.0 MVP. JSON/logfmt/plain parsing, field/level/time filtering, formatted and raw output,
-> gzip input, and in-memory sorting work and are covered by tests.
-> The query language (`-q`), follow mode (`-F`), pager, themes, and index-backed sorting are **not implemented**
-> in this build; those flags fail with a clear error instead of being silently ignored.
+> **Status:** v0.2. Query language implemented. JSON/logfmt/plain parsing, field/level/time filtering,
+> formatted and raw output, gzip input, in-memory sorting, and the full `-q` boolean query language work and
+> are covered by tests.
+> Follow mode (`-F`), pager, themes, and index-backed sorting are **not implemented** in this build; those
+> flags fail with a clear error instead of being silently ignored.
 
 ## Why
 
@@ -14,13 +15,17 @@ log file locally, filters it precisely, and renders it clearly — while remaini
 
 ## Features
 
-Implemented in v0.1.0:
+Implemented in v0.2.0:
 
 - **Formats:** JSON/JSONL, logfmt, and plain text, with auto-detection per line.
 - **Compression:** gzip (including multi-member `.gz`), detected by magic bytes.
 - **Filters:** `-l/--level` threshold, `-f/--filter` field filters
   (`=`, `!=`, `~=`, `!~=`, `~~=`, `!~~=`, plus the `key?` absent-field modifier),
   and `--since`/`--until` with RFC 3339, `YYYY-MM-DD`, `now`, `today`, `yesterday`, and `-3h`/`-14d` offsets.
+- **Queries:** `-q/--query` boolean query language — `and`/`or`/`not`, parentheses, comparisons with
+  aliases (`eq`, `ne`, `gt`, `ge`, `lt`, `le`, `contain`, `match`), `in (...)`, `like`/`not like` wildcards,
+  `exists(...)`, the absent-field `?` modifier, and value sets via `in @file` / `in @-`. Multiple queries and
+  `-f` filters are ANDed.
 - **Field paths:** nested paths (`request.method`), array wildcards (`span.[].name`), and indexes (`span.[0].name`).
 - **Output:** aligned time/level/message columns, color when the output is a TTY, `NO_COLOR` support,
   `-h/--hide` (with `!` reveal and `*`), `-e/-E` empty-field control, `-x` expansion modes,
@@ -30,8 +35,8 @@ Implemented in v0.1.0:
 - **Sorting:** `-s` chronological merge across files (in-memory).
 - **Errors:** deterministic exit codes (`0` success, `1` usage/query, `2` I/O, `3` broken pipe, `130` interrupted).
 
-Planned but not in this build: `-q` query language, `-F` follow mode, pager integration, themes, zstd/bzip2/xz,
-and index-backed external sorting. See [PLAN.md](PLAN.md).
+Planned but not in this build: `-F` follow mode, pager integration, themes, zstd/bzip2/xz, and index-backed
+external sorting. See [PLAN.md](PLAN.md).
 
 ## Quick start
 
@@ -47,6 +52,12 @@ logcli -f request.method=GET app.log
 
 # Regex on a field, excluding entries where the field is absent
 logcli -f 'message~~="timeout|refused"' app.log
+
+# Boolean queries: errors only, with a status code >= 500
+logcli -q 'level = error and status >= 500' app.log
+
+# Value set membership: status in (200, 201, 204)
+logcli -q 'status in (200, 201, 204)' app.log
 
 # Sort/merge files chronologically (in-memory)
 logcli -s api.log worker.log

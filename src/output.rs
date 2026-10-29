@@ -33,7 +33,7 @@ impl ColorMode {
             ColorMode::Always => true,
             ColorMode::Auto => {
                 tty_output
-                    && std::env::var_os("NO_COLOR").map_or(true, |value| value.is_empty())
+                    && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
                     && std::env::var("TERM").map_or(true, |term| term != "dumb")
             }
         }
