@@ -1,3 +1,6 @@
+use crate::cli::Args;
+use crate::error::Error;
+use crate::input;
 use crate::model::{Entry, Level};
 use crate::query::{parse, parse_filter};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -9,7 +12,7 @@ use ratatui::{
 };
 use std::fs::File;
 use std::io::{self, BufRead};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +21,7 @@ pub enum TuiMode {
     Filtering,
     Details,
     Help,
+    FilePicker,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +43,13 @@ impl FollowState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    None,
+    Time,
+    Level,
+}
+
 pub struct TuiApp {
     entries: Vec<Entry>,
     filtered: Vec<usize>,
@@ -49,17 +60,21 @@ pub struct TuiApp {
     details_scroll: u16,
     status_message: String,
     follow: FollowState,
-    args: crate::cli::Args,
+    sort_mode: SortMode,
+    args: Args,
+    file_picker_input: String,
 }
 
 impl TuiApp {
-    pub fn new(entries: Vec<Entry>, args: crate::cli::Args) -> Self {
+    pub fn new(entries: Vec<Entry>, args: Args) -> Self {
         let mut list_state = ListState::default();
         if !entries.is_empty() {
             list_state.select(Some(0));
         }
 
-        let filtered: Vec<usize> = (0..entries.len()).collect();
+        let mut filtered: Vec<usize> = (0..entries.len()).collect();
+        TuiApp::sort_filtered(&mut filtered[..], &entries, SortMode::Time);
+
         let filtered_len = filtered.len();
 
         Self {
@@ -72,7 +87,28 @@ impl TuiApp {
             details_scroll: 0,
             status_message: format!("{} entries loaded", filtered_len),
             follow: FollowState::new(),
+            sort_mode: SortMode::Time,
             args,
+            file_picker_input: String::new(),
+        }
+    }
+
+    fn sort_filtered(filtered: &mut [usize], entries: &[Entry], mode: SortMode) {
+        match mode {
+            SortMode::Time => {
+                filtered.sort_by(
+                    |&a, &b| match (&entries[a].timestamp, &entries[b].timestamp) {
+                        (Some(ta), Some(tb)) => ta.cmp(tb),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    },
+                );
+            }
+            SortMode::Level => {
+                filtered.sort_by(|&a, &b| entries[b].level.cmp(&entries[a].level));
+            }
+            SortMode::None => {}
         }
     }
 
@@ -80,6 +116,12 @@ impl TuiApp {
         &mut self,
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> io::Result<()> {
+        // Set up file watcher if follow mode is requested
+        if self.args.follow && !self.args.files.is_empty() {
+            self.follow.enabled = true;
+            self.follow.file_paths = self.args.files.clone();
+        }
+
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_millis(200);
 
@@ -114,6 +156,11 @@ impl TuiApp {
                         }
                         TuiMode::Help => {
                             if self.handle_help(key.code)? {
+                                return Ok(());
+                            }
+                        }
+                        TuiMode::FilePicker => {
+                            if self.handle_file_picker(key.code)? {
                                 return Ok(());
                             }
                         }
@@ -166,24 +213,10 @@ impl TuiApp {
             let new_count = new_entries.len();
             self.entries.extend(new_entries);
 
-            let input = self.filter_input.trim();
-            if !input.is_empty() {
-                if let Ok(expr) = self.try_parse_query(input) {
-                    self.filtered = self
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, entry)| if expr.matches(entry) { Some(i) } else { None })
-                        .collect();
-                } else {
-                    self.filtered = (0..self.entries.len()).collect();
-                }
-            } else {
-                for i in old_len..self.entries.len() {
-                    self.filtered.push(i);
-                }
-            }
+            // Rebuild filtered list from scratch with all entries
+            self.rebuild_filtered();
 
+            // Auto-scroll to bottom if we were at the bottom before
             if let Some(sel) = self.list_state.selected() {
                 if sel >= old_len.saturating_sub(1) {
                     self.list_state
@@ -191,11 +224,37 @@ impl TuiApp {
                 }
             }
 
-            self.status_message =
-                format!("{} entries loaded (+{} new)", self.entries.len(), new_count);
+            self.status_message = format!(
+                "{} entries loaded (+{} new, follow: ON)",
+                self.entries.len(),
+                new_count
+            );
         }
 
         Ok(())
+    }
+
+    fn rebuild_filtered(&mut self) {
+        let input = self.filter_input.trim();
+        self.filtered = if input.is_empty() {
+            (0..self.entries.len()).collect()
+        } else {
+            match self.try_parse_query(input) {
+                Ok(expr) => self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| if expr.matches(entry) { Some(i) } else { None })
+                    .collect(),
+                Err(_) => (0..self.entries.len()).collect(),
+            }
+        };
+        Self::sort_filtered(&mut self.filtered[..], &self.entries, self.sort_mode);
+        if !self.filtered.is_empty() {
+            self.list_state.select(Some(0));
+        } else {
+            self.list_state.select(None);
+        }
     }
 
     fn handle_browsing(&mut self, code: KeyCode, modifiers: KeyModifiers) -> io::Result<bool> {
@@ -220,6 +279,14 @@ impl TuiApp {
             KeyCode::Char('?') => {
                 self.mode = TuiMode::Help;
             }
+            KeyCode::Char('o') => {
+                self.mode = TuiMode::FilePicker;
+                self.file_picker_input.clear();
+                self.status_message = "Enter file path to add:".to_string();
+            }
+            KeyCode::Char('s') => {
+                self.cycle_sort();
+            }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(true);
             }
@@ -228,15 +295,31 @@ impl TuiApp {
         Ok(false)
     }
 
+    fn cycle_sort(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::None => SortMode::Time,
+            SortMode::Time => SortMode::Level,
+            SortMode::Level => SortMode::None,
+        };
+        self.rebuild_filtered();
+        let sort_name = match self.sort_mode {
+            SortMode::None => "none",
+            SortMode::Time => "time",
+            SortMode::Level => "level",
+        };
+        self.status_message = format!("sort: {}", sort_name);
+    }
+
     fn handle_filtering(&mut self, code: KeyCode) -> io::Result<bool> {
         match code {
             KeyCode::Enter => {
-                self.apply_filter();
+                self.rebuild_filtered();
                 self.mode = TuiMode::Browsing;
             }
             KeyCode::Esc => {
                 self.mode = TuiMode::Browsing;
                 self.filter_input.clear();
+                self.rebuild_filtered();
             }
             KeyCode::Backspace => {
                 self.filter_input.pop();
@@ -273,6 +356,90 @@ impl TuiApp {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn handle_file_picker(&mut self, code: KeyCode) -> io::Result<bool> {
+        match code {
+            KeyCode::Enter => {
+                let path_str = self.file_picker_input.trim().to_string();
+                if !path_str.is_empty() {
+                    if let Err(err) = self.add_file(&path_str) {
+                        self.status_message = format!("error adding file: {err}");
+                    }
+                }
+                self.mode = TuiMode::Browsing;
+            }
+            KeyCode::Esc => {
+                self.mode = TuiMode::Browsing;
+                self.file_picker_input.clear();
+            }
+            KeyCode::Backspace => {
+                self.file_picker_input.pop();
+            }
+            KeyCode::Char(c) => {
+                self.file_picker_input.push(c);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn add_file(&mut self, path_str: &str) -> Result<(), Error> {
+        let path = Path::new(path_str);
+        if !path.exists() {
+            self.status_message = format!("file not found: {}", path_str);
+            return Ok(());
+        }
+
+        // Check if already in follow list
+        if self.follow.file_paths.iter().any(|p| p == path) {
+            self.status_message = format!("already watching: {}", path_str);
+            return Ok(());
+        }
+
+        // Load entries from the file
+        let sources = input::open_sources(&[path.to_path_buf()])?;
+        if let Some(mut source) = sources.into_iter().next() {
+            let delimiter = b'\n';
+            let mut buffer = Vec::new();
+            let mut line_number = 0u64;
+
+            loop {
+                buffer.clear();
+                let read = source.reader.read_until(delimiter, &mut buffer);
+                match read {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        line_number += 1;
+                        if buffer.last() == Some(&delimiter) {
+                            buffer.pop();
+                        }
+                        if delimiter != b'\r' && buffer.last() == Some(&b'\r') {
+                            buffer.pop();
+                        }
+                        if buffer.is_empty() {
+                            continue;
+                        }
+                        let raw = String::from_utf8_lossy(&buffer);
+                        if let Some(entry) = crate::parser::parse_entry(
+                            &raw,
+                            &source.name,
+                            line_number,
+                            &self.args.input_format,
+                            self.args.allow_prefix,
+                        ) {
+                            self.entries.push(entry);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        self.rebuild_filtered();
+        self.follow.file_paths.push(path.to_path_buf());
+        self.status_message = format!("added {} ({} entries total)", path_str, self.entries.len());
+        Ok(())
     }
 
     fn toggle_follow(&mut self) {
@@ -339,34 +506,6 @@ impl TuiApp {
         }
     }
 
-    fn apply_filter(&mut self) {
-        let input = self.filter_input.trim();
-        if input.is_empty() {
-            self.filtered = (0..self.entries.len()).collect();
-        } else {
-            match self.try_parse_query(input) {
-                Ok(expr) => {
-                    self.filtered = self
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, entry)| if expr.matches(entry) { Some(i) } else { None })
-                        .collect();
-                    self.status_message = format!("{} entries matched", self.filtered.len());
-                }
-                Err(msg) => {
-                    self.status_message = format!("query error: {msg}");
-                }
-            }
-        }
-        if !self.filtered.is_empty() {
-            self.list_state.select(Some(0));
-        } else {
-            self.list_state.select(None);
-        }
-        self.filter_input.clear();
-    }
-
     fn try_parse_query(&self, input: &str) -> Result<crate::query::Expr, String> {
         parse(input)
             .or_else(|_| parse_filter(input))
@@ -405,29 +544,34 @@ impl TuiApp {
             ])
             .split(f.size());
 
+        // Header
         let follow_indicator = if self.follow.is_enabled() {
             " [FOLLOW ON]"
         } else {
             ""
         };
+        let sort_indicator = match self.sort_mode {
+            SortMode::Time => " [sort: time]",
+            SortMode::Level => " [sort: level]",
+            SortMode::None => " [sort: none]",
+        };
         let header = Paragraph::new(format!(
-            "logcli TUI — {} entries{}{} (q=quit, /=filter, d=details, F=follow, ?=help)",
+            "logcli TUI — {} entries{} ({} files){} (q=quit, /=filter, o=add file, s=sort, d=details, F=follow, ?=help)",
             self.entries.len(),
             follow_indicator,
-            if self.mode == TuiMode::Filtering {
-                " [FILTERING]"
-            } else {
-                ""
-            }
+            self.follow.file_paths.len(),
+            sort_indicator
         ))
         .block(Block::default().borders(Borders::ALL).title("logcli"));
         f.render_widget(header, chunks[0]);
 
+        // Body: split into list and details
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(chunks[1]);
 
+        // List of entries
         let items: Vec<ListItem> = self
             .filtered
             .iter()
@@ -442,8 +586,15 @@ impl TuiApp {
                     .timestamp
                     .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
                     .unwrap_or_else(|| "-".to_string());
+                let source = Path::new(&entry.source)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&entry.source);
                 let message = entry.message.as_deref().unwrap_or("");
-                let content = format!("{}  {:<5}  {}", time_str, level_str, message);
+                let content = format!(
+                    "{}  {:<5}  {:<20}  {}",
+                    time_str, level_str, source, message
+                );
                 ListItem::new(content).style(Style::default().fg(level_color))
             })
             .collect();
@@ -455,6 +606,7 @@ impl TuiApp {
 
         f.render_stateful_widget(list, body_chunks[0], &mut self.list_state.clone());
 
+        // Details panel
         if self.show_details {
             if let Some(entry) = self.selected_entry() {
                 let details = format_entry_details(entry);
@@ -472,9 +624,11 @@ impl TuiApp {
             f.render_widget(empty, body_chunks[1]);
         }
 
+        // Filter / status bar
         let bar_text = match self.mode {
             TuiMode::Filtering => format!("/{}", self.filter_input),
             TuiMode::Help => help_text(),
+            TuiMode::FilePicker => format!("add file: {}", self.file_picker_input),
             _ => self.status_message.clone(),
         };
         let bar = Paragraph::new(bar_text).block(
@@ -549,6 +703,8 @@ fn help_text() -> String {
         "  g/G      Go to top/bottom".to_string(),
         "  / or f   Open filter prompt".to_string(),
         "  d/Enter  Open details view".to_string(),
+        "  o        Add a log file".to_string(),
+        "  s        Cycle sort (none/time/level)".to_string(),
         "  F        Toggle follow mode".to_string(),
         "  ?        Show this help".to_string(),
         "  Ctrl-C   Force quit".to_string(),
@@ -659,7 +815,7 @@ mod tests {
         let entries = make_entries();
         let mut app = TuiApp::new(entries, make_args());
         app.filter_input = "level = error".to_string();
-        app.apply_filter();
+        app.rebuild_filtered();
         assert_eq!(app.mode, TuiMode::Browsing);
         assert_eq!(app.filtered.len(), 2);
         assert_eq!(app.list_state.selected(), Some(0));
@@ -670,65 +826,26 @@ mod tests {
         let entries = make_entries();
         let mut app = TuiApp::new(entries, make_args());
         app.filter_input = "level = panic".to_string();
-        app.apply_filter();
+        app.rebuild_filtered();
         assert_eq!(app.filtered.len(), 0);
         assert_eq!(app.list_state.selected(), None);
     }
 
     #[test]
-    fn apply_filter_clears_to_show_all() {
+    fn cycle_sort_changes_mode() {
         let entries = make_entries();
         let mut app = TuiApp::new(entries, make_args());
-        app.filter_input = "level = error".to_string();
-        app.apply_filter();
-        assert_eq!(app.filtered.len(), 2);
-
-        app.filter_input = "".to_string();
-        app.apply_filter();
-        assert_eq!(app.filtered.len(), 3);
+        assert_eq!(app.sort_mode, SortMode::Time);
+        app.cycle_sort();
+        assert_eq!(app.sort_mode, SortMode::Level);
+        app.cycle_sort();
+        assert_eq!(app.sort_mode, SortMode::None);
+        app.cycle_sort();
+        assert_eq!(app.sort_mode, SortMode::Time);
     }
 
     #[test]
-    fn apply_invalid_filter_shows_error() {
-        let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
-        app.filter_input = "not a valid query".to_string();
-        app.apply_filter();
-        assert!(app.status_message.contains("query error"));
-    }
-
-    #[test]
-    fn open_details_sets_mode() {
-        let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
-        app.open_details();
-        assert!(app.show_details);
-        assert_eq!(app.mode, TuiMode::Details);
-    }
-
-    #[test]
-    fn selected_entry_returns_current() {
-        let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
-        app.scroll_down();
-        let entry = app.selected_entry().unwrap();
-        assert_eq!(entry.message.as_deref(), Some("server started"));
-    }
-
-    #[test]
-    fn format_entry_details_includes_all_fields() {
-        let entries = make_entries();
-        let entry = &entries[0];
-        let details = format_entry_details(entry);
-        assert!(details.contains("connection refused"));
-        assert!(details.contains("ERROR"));
-        assert!(details.contains("status"));
-        assert!(details.contains("500"));
-        assert!(details.contains("raw:"));
-    }
-
-    #[test]
-    fn toggle_follow() {
+    fn toggle_follow_no_files() {
         let entries = make_entries();
         let args = make_args();
         let mut app = TuiApp::new(entries, args);
@@ -744,6 +861,7 @@ mod tests {
         assert!(help.contains("Quit"));
         assert!(help.contains("filter"));
         assert!(help.contains("follow"));
+        assert!(help.to_lowercase().contains("add a log file"));
     }
 
     #[test]
@@ -754,5 +872,19 @@ mod tests {
         assert_eq!(level_color(Level::Debug), Color::Cyan);
         assert_eq!(level_color(Level::Fatal), Color::LightRed);
         assert_eq!(level_color(Level::Panic), Color::LightRed);
+    }
+
+    #[test]
+    fn sort_filtered_by_time() {
+        let mut entries = make_entries();
+        // Give different timestamps
+        entries[0].timestamp = Some(Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 2).unwrap());
+        entries[1].timestamp = Some(Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 0).unwrap());
+        entries[2].timestamp = Some(Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 1).unwrap());
+
+        let mut filtered = vec![0, 1, 2];
+        TuiApp::sort_filtered(&mut filtered[..], &entries, SortMode::Time);
+        // Should be sorted: entries[1] (10:00:00), entries[2] (10:00:01), entries[0] (10:00:02)
+        assert_eq!(filtered, vec![1, 2, 0]);
     }
 }

@@ -10,9 +10,16 @@ mod query;
 mod tui;
 
 use clap::Parser;
+use std::io::IsTerminal;
 
 fn main() {
-    let args = cli::Args::parse();
+    let mut args = cli::Args::parse();
+
+    // Auto-launch the interactive TUI when no files are given and stdin is a TTY.
+    // When stdin is piped, batch mode reads from stdin as before.
+    if !args.tui && args.files.is_empty() && std::io::stdin().is_terminal() {
+        args.tui = true;
+    }
 
     match app::run(args) {
         Ok(()) => {}

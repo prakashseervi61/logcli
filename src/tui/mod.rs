@@ -14,7 +14,13 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 pub fn run(args: Args) -> Result<(), Error> {
-    let entries = load_entries(&args)?;
+    let entries = if args.files.is_empty() {
+        // No files given: start with an empty TUI. The user can still filter,
+        // but there's nothing to display until files are loaded (future feature).
+        Vec::new()
+    } else {
+        load_entries(&args)?
+    };
 
     let mut app = TuiApp::new(entries, args);
 

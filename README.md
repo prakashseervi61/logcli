@@ -87,6 +87,8 @@ In the TUI:
 - `g`/`G` — go to top/bottom
 - `/` or `f` — open filter prompt
 - `d`/`Enter` — open details view
+- `o` — add a log file (enter path)
+- `s` — cycle sort (none / time / level)
 - `F` — toggle follow mode
 - `?` — show help
 - `q` — quit
