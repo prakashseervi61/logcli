@@ -73,7 +73,7 @@ Every example in [CLI_SPEC.md §10](CLI_SPEC.md#10-examples-normative) is a test
 ### 4.2 Filtering
 - [ ] `-l` at every threshold
 - [ ] `-f` all six operator forms + `?` variants
-- [ ] `-q` all examples in QUERY_SPEC §10
+- [x] `-q` all examples in QUERY_SPEC §10
 - [ ] `--since/--until` absolute, keyword, relative (freeze clock or use generated fixtures relative to now)
 - [ ] Combination of `-l`, `-f`, `-q`, time → AND semantics
 - [ ] No match → exit 0, empty output

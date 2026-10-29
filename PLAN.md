@@ -21,7 +21,7 @@ All project documents live in [`docs/`](docs/README.md):
 
 **Rule:** CLI_SPEC, PARSING_SPEC, and QUERY_SPEC are normative. Behavior changes require a spec update in the same PR.
 
-## Status (v0.1.0 MVP)
+## Status (v0.2.0)
 
 Implemented and tested:
 
@@ -31,11 +31,15 @@ Implemented and tested:
 - formatted and raw output, colors, hiding, expansion, time zones, file output
 - in-memory `-s` sorting
 - exit codes and error model
+- boolean `-q` query language (full QUERY_SPEC: `and`/`or`/`not`, parentheses, comparisons,
+  `in (...)`, `like`/`not like`, `exists(...)`, absent-field `?`, value sets `@file`/`@-`)
+- interactive TUI dashboard (`--tui`): scrollable list, color-coded levels, live query filtering,
+  details view, follow mode toggle, help screen
 
-Not implemented (rejected with a clear error or accepted as no-ops): `-q`, `-F`, pager, themes,
+Not implemented (rejected with a clear error or accepted as no-ops): `-F`, pager, themes,
 zstd/bzip2/xz, index-backed external sorting, config files, completions.
 
-18 unit tests + 15 integration tests pass. Build/test via Docker is documented in
+52 unit tests + 15 CLI integration tests + 27 query integration tests pass. Build/test via Docker is documented in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Goal
@@ -153,7 +157,7 @@ submodules rather than growing the existing files past their current responsibil
 - [x] logfmt parser and format detection
 - [x] Error model and exit codes per CLI_SPEC
 - **Exit:** parsing and filter examples covered by tests.
-- [ ] Add wildcard operators and the QUERY_SPEC §10 matrix as dedicated tests
+- [x] Add wildcard operators and the QUERY_SPEC §10 matrix as dedicated tests
 
 ### Phase 3 — Query Language (v0.2 — completed)
 - [x] Lexer, parser (EBNF in QUERY_SPEC), AST
@@ -219,13 +223,12 @@ See [TEST_PLAN.md](docs/TEST_PLAN.md). Merge requires:
 
 ## Immediate Next Steps
 
-1. Implement the `-q` query language (lexer, parser, evaluator) per QUERY_SPEC.
-2. Replace in-memory `-s` with the on-disk index and k-way merge (ADR 0003).
-3. Implement `-F` follow mode with `--tail`.
-4. Add theme engine and pager integration.
-5. Add zstd/bzip2/xz support behind feature flags.
-6. Add CI workflow with fmt/clippy/test on three platforms.
-7. Resolve remaining PRD open questions (name, license, logfmt priority, `--sort` default).
+1. Replace in-memory `-s` with the on-disk index and k-way merge (ADR 0003).
+2. Implement `-F` follow mode with `--tail`.
+3. Add theme engine and pager integration.
+4. Add zstd/bzip2/xz support behind feature flags.
+5. Add CI workflow with fmt/clippy/test on three platforms.
+6. Resolve remaining PRD open questions (name, license, logfmt priority, `--sort` default).
 
 ## Reference Material
 
