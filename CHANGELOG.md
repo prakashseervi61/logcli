@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   - 18 unit tests and 15 integration tests with fixtures.
   - Docker dev image (`scripts/Dockerfile.dev`) with rustfmt/clippy plus cargo helper scripts
     for hosts without a Rust toolchain.
+  - Cross-compilation to a native Windows `logcli.exe` (`scripts/Dockerfile.windows`,
+    `scripts/build-windows.ps1 -Install`) so the CLI runs without Docker at runtime.
 - Project documentation set:
   - Product Requirements Document (`docs/PRD.md`)
   - CLI specification (`docs/CLI_SPEC.md`)

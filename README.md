@@ -90,6 +90,28 @@ Run the CLI inside the container:
 ./scripts/docker-cargo.sh run -- tests/fixtures/simple.jsonl
 ```
 
+### Native Windows executable
+
+If you want a `logcli.exe` that runs directly in Windows Terminal / PowerShell — no Docker at runtime —
+cross-compile it from the Linux container (MinGW is installed in the build image):
+
+```powershell
+# Build only: writes dist\logcli.exe
+.\scripts\build-windows.ps1
+
+# Build and install: copies to %USERPROFILE%\bin and adds it to the user PATH
+.\scripts\build-windows.ps1 -Install
+```
+
+Open a **new** terminal after `-Install`, then:
+
+```powershell
+logcli --version
+logcli tests\fixtures\simple.jsonl
+```
+
+Until then you can run it from the repository with `.\dist\logcli.exe`.
+
 ## Documentation
 
 | Document | Contents |

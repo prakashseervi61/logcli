@@ -1,0 +1,9 @@
+# Cross-compilation image: produces a native Windows executable from Linux.
+# Build once (the helper script does this automatically):
+#   docker build -f scripts/Dockerfile.windows -t logcli-rust:windows .
+FROM rust:1-slim
+
+RUN rustup target add x86_64-pc-windows-gnu \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*

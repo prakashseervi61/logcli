@@ -49,6 +49,14 @@ Run the same quality gates CI uses:
 ./scripts/docker-cargo.sh clippy --all-targets -- -D warnings
 ```
 
+Build a native Windows executable from the same container (MinGW is installed in
+`scripts/Dockerfile.windows`):
+
+```powershell
+.\scripts\build-windows.ps1            # dist\logcli.exe
+.\scripts\build-windows.ps1 -Install   # also installs to %USERPROFILE%\bin and updates user PATH
+```
+
 ## Development commands
 
 | Task | Command |
