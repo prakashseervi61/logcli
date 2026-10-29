@@ -596,7 +596,12 @@ impl TuiApp {
     fn draw(&self, f: &mut Frame) {
         let theme = self.theme;
         let size = f.size();
-        let header_height = if size.height > 10 { 7 } else { 4 };
+        // Give enough vertical space: 6 banner lines + 1 blank + 1 info line = 8 minimum
+        let header_height = if size.height > 12 {
+            9
+        } else {
+            size.height.saturating_sub(4)
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -618,7 +623,7 @@ impl TuiApp {
             SortMode::None => " [sort: none]",
         };
 
-        // Banner lines - each on its own Line to prevent overlap
+        // Banner lines - each on its own Line to prevent overlap/corruption
         let banner_lines: Vec<ratatui::text::Line> = logcli_banner()
             .iter()
             .enumerate()
@@ -630,41 +635,26 @@ impl TuiApp {
                 };
                 ratatui::text::Line::from(ratatui::text::Span::styled(
                     line.to_string(),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    Style::default().fg(color),
                 ))
             })
             .collect();
 
-        // Subtitle line - truncated to fit terminal width
-        let subtitle = format!(
-            "{} entries  {} files  {}",
+        // Info line below banner (no truncation, no wrapping)
+        let info_line = format!(
+            "logcli TUI{}{}  {} entries  {} files",
+            follow_indicator,
+            sort_indicator,
             self.entries.len(),
             self.follow.file_paths.len(),
-            if self.mode == TuiMode::Filtering {
-                "[FILTERING]"
-            } else {
-                ""
-            }
         );
-        let help_hint = "(q=quit, /=filter, o=add file, s=sort, d=details, F=follow, ?=help)";
-        let header_line = format!(
-            "logcli TUI{}{}  {}  {}",
-            follow_indicator, sort_indicator, subtitle, help_hint
-        );
-        // Truncate header line to fit within terminal width minus borders
-        let max_width = size.width.saturating_sub(4);
-        let header_line = if header_line.len() > max_width as usize {
-            let keep = max_width.saturating_sub(3);
-            format!("{}...", &header_line[..keep as usize])
-        } else {
-            header_line
-        };
 
         let header_text: Vec<ratatui::text::Line> = std::iter::once(ratatui::text::Line::from(""))
             .chain(banner_lines)
+            .chain(std::iter::once(ratatui::text::Line::from("")))
             .chain(std::iter::once(ratatui::text::Line::from(vec![
                 ratatui::text::Span::styled(
-                    header_line,
+                    info_line,
                     Style::default()
                         .fg(theme.text_bright)
                         .add_modifier(Modifier::BOLD),
@@ -806,15 +796,16 @@ fn level_color(level: Level) -> Color {
     }
 }
 
-/// Simple "logcli" text banner that renders in any terminal.
+/// ASCII art logo for the TUI header.
+/// Raw string literal preserves all backslashes and spaces exactly.
 fn logcli_banner() -> Vec<&'static str> {
     vec![
-        "  ____        _     _       ",
-        " / ___| _ __ (_) __| | ___  ",
-        "| |  _ | '_ \\| |/ _` |/ _ \\ ",
-        "| |_| || |_) | | (_| |  __/ ",
-        " \\____|| .__/|_|\\__,_|\\___| ",
-        "     |_|                    ",
+        r#"  ____        _     _"#,
+        r#" / ___| _ __ (_) __| | ___"#,
+        r#"| |  _ | '_ \| |/ _` |/ _ \"#,
+        r#"| |_| || |_) | | (_| |  __/"#,
+        r#" \____|| .__/|_|\__,_|\___|"#,
+        r#"     |_|                  "#,
     ]
 }
 
