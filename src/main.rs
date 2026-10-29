@@ -24,7 +24,6 @@ fn main() {
     match app::run(args) {
         Ok(()) => {}
         Err(error::Error::BrokenPipe) => std::process::exit(3),
-        Err(error::Error::Interrupted) => std::process::exit(130),
         Err(err) => {
             eprintln!("logcli: error: {err}");
             std::process::exit(err.exit_code());

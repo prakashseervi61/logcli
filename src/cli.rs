@@ -68,10 +68,6 @@ pub struct Args {
     #[arg(long = "no-color")]
     pub no_color: bool,
 
-    /// Color theme (accepted; themes are not implemented yet)
-    #[arg(long = "theme", value_name = "THEME", default_value = "uni")]
-    pub theme: String,
-
     /// Hide fields; prefix with '!' to reveal, '*' for all
     #[arg(short = 'h', long = "hide", value_name = "KEY")]
     pub hide: Vec<String>,
@@ -128,14 +124,6 @@ pub struct Args {
     #[arg(short = 'r', long = "raw")]
     pub raw: bool,
 
-    /// Pager usage: auto, always, never (pager support is not implemented yet)
-    #[arg(long = "paging", value_name = "WHEN", default_value = "auto")]
-    pub paging: String,
-
-    /// Alias for --paging=never
-    #[arg(short = 'P')]
-    pub no_paging: bool,
-
     /// Sort entries chronologically (in-memory for now)
     #[arg(short = 's', long = "sort")]
     pub sort: bool,
@@ -147,14 +135,6 @@ pub struct Args {
     /// Follow input files (not implemented yet in batch mode; used by TUI)
     #[arg(short = 'F', long = "follow")]
     pub follow: bool,
-
-    /// Number of entries to preload in follow mode
-    #[arg(long = "tail", value_name = "N", default_value_t = 10)]
-    pub tail: usize,
-
-    /// Number of processing threads (accepted; reserved)
-    #[arg(short = 'C', long = "concurrency", value_name = "N")]
-    pub concurrency: Option<usize>,
 
     /// Show diagnostics on stderr
     #[arg(short = 'v', long = "verbose")]

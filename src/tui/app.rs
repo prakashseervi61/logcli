@@ -15,52 +15,23 @@ use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Color theme for the TUI. Inspired by terminal log viewers (lnav, toolong, gonzo).
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct ColorTheme {
-    pub header: Color,
-    pub header_accent: Color,
-    pub border: Color,
-    pub border_active: Color,
-    pub level_trace: Color,
-    pub level_debug: Color,
-    pub level_info: Color,
-    pub level_warn: Color,
-    pub level_error: Color,
-    pub level_fatal: Color,
-    pub level_panic: Color,
-    pub text_dim: Color,
-    pub text_bright: Color,
-    pub status_ok: Color,
-    pub status_warn: Color,
-    pub status_error: Color,
-    pub highlight: Color,
-}
-
-impl Default for ColorTheme {
-    fn default() -> Self {
-        Self {
-            header: Color::Cyan,
-            header_accent: Color::Magenta,
-            border: Color::DarkGray,
-            border_active: Color::Cyan,
-            level_trace: Color::DarkGray,
-            level_debug: Color::Cyan,
-            level_info: Color::Green,
-            level_warn: Color::Yellow,
-            level_error: Color::Red,
-            level_fatal: Color::LightRed,
-            level_panic: Color::LightRed,
-            text_dim: Color::DarkGray,
-            text_bright: Color::White,
-            status_ok: Color::Green,
-            status_warn: Color::Yellow,
-            status_error: Color::Red,
-            highlight: Color::LightCyan,
-        }
-    }
-}
+const HEADER_COLOR: Color = Color::Cyan;
+const HEADER_ACCENT: Color = Color::Magenta;
+const BORDER_COLOR: Color = Color::DarkGray;
+const BORDER_ACTIVE: Color = Color::Cyan;
+const LEVEL_TRACE: Color = Color::DarkGray;
+const LEVEL_DEBUG: Color = Color::Cyan;
+const LEVEL_INFO: Color = Color::Green;
+const LEVEL_WARN: Color = Color::Yellow;
+const LEVEL_ERROR: Color = Color::Red;
+const LEVEL_FATAL: Color = Color::LightRed;
+const LEVEL_PANIC: Color = Color::LightRed;
+const TEXT_DIM: Color = Color::DarkGray;
+const TEXT_BRIGHT: Color = Color::White;
+const STATUS_OK: Color = Color::Green;
+const STATUS_WARN: Color = Color::Yellow;
+const STATUS_ERROR: Color = Color::Red;
+const HIGHLIGHT: Color = Color::LightCyan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiMode {
@@ -71,28 +42,8 @@ pub enum TuiMode {
     FilePicker,
 }
 
-#[derive(Debug, Clone)]
-pub struct FollowState {
-    enabled: bool,
-    file_paths: Vec<PathBuf>,
-}
-
-impl FollowState {
-    pub fn new() -> Self {
-        Self {
-            enabled: false,
-            file_paths: Vec::new(),
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
-    None,
     Time,
     Level,
 }
@@ -107,11 +58,11 @@ pub struct TuiApp {
     details_scroll: u16,
     status_message: String,
     status_color: Color,
-    follow: FollowState,
-    sort_mode: SortMode,
+    follow_enabled: bool,
+    follow_paths: Vec<PathBuf>,
+    sort_mode: Option<SortMode>,
     args: Args,
     file_picker_input: String,
-    theme: ColorTheme,
 }
 
 impl TuiApp {
@@ -122,7 +73,7 @@ impl TuiApp {
         }
 
         let mut filtered: Vec<usize> = (0..entries.len()).collect();
-        TuiApp::sort_filtered(&mut filtered[..], &entries, SortMode::Time);
+        Self::sort_filtered(&mut filtered[..], &entries, Some(SortMode::Time));
 
         let filtered_len = filtered.len();
 
@@ -135,31 +86,12 @@ impl TuiApp {
             show_details: false,
             details_scroll: 0,
             status_message: format!("{} entries loaded", filtered_len),
-            status_color: Color::Green,
-            follow: FollowState::new(),
-            sort_mode: SortMode::Time,
+            status_color: STATUS_OK,
+            follow_enabled: false,
+            follow_paths: Vec::new(),
+            sort_mode: Some(SortMode::Time),
             args,
             file_picker_input: String::new(),
-            theme: ColorTheme::default(),
-        }
-    }
-
-    fn sort_filtered(filtered: &mut [usize], entries: &[Entry], mode: SortMode) {
-        match mode {
-            SortMode::Time => {
-                filtered.sort_by(
-                    |&a, &b| match (&entries[a].timestamp, &entries[b].timestamp) {
-                        (Some(ta), Some(tb)) => ta.cmp(tb),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    },
-                );
-            }
-            SortMode::Level => {
-                filtered.sort_by(|&a, &b| entries[b].level.cmp(&entries[a].level));
-            }
-            SortMode::None => {}
         }
     }
 
@@ -169,8 +101,8 @@ impl TuiApp {
     ) -> io::Result<()> {
         // Set up file watcher if follow mode is requested
         if self.args.follow && !self.args.files.is_empty() {
-            self.follow.enabled = true;
-            self.follow.file_paths = self.args.files.clone();
+            self.follow_enabled = true;
+            self.follow_paths = self.args.files.clone();
         }
 
         let mut last_tick = Instant::now();
@@ -224,13 +156,13 @@ impl TuiApp {
     }
 
     fn handle_tick(&mut self) -> io::Result<()> {
-        if !self.follow.is_enabled() {
+        if !self.follow_enabled {
             return Ok(());
         }
 
         let mut new_entries = Vec::new();
 
-        for path in &self.follow.file_paths {
+        for path in &self.follow_paths {
             if let Ok(file) = File::open(path) {
                 let reader = io::BufReader::new(file);
                 let delimiter = b'\n';
@@ -280,7 +212,7 @@ impl TuiApp {
                 self.entries.len(),
                 new_count
             );
-            self.status_color = self.theme.status_ok;
+            self.status_color = STATUS_OK;
         }
 
         Ok(())
@@ -306,6 +238,25 @@ impl TuiApp {
             self.list_state.select(Some(0));
         } else {
             self.list_state.select(None);
+        }
+    }
+
+    fn sort_filtered(filtered: &mut [usize], entries: &[Entry], mode: Option<SortMode>) {
+        match mode {
+            Some(SortMode::Time) => {
+                filtered.sort_by(
+                    |&a, &b| match (&entries[a].timestamp, &entries[b].timestamp) {
+                        (Some(ta), Some(tb)) => ta.cmp(tb),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    },
+                );
+            }
+            Some(SortMode::Level) => {
+                filtered.sort_by(|&a, &b| entries[b].level.cmp(&entries[a].level));
+            }
+            None => {}
         }
     }
 
@@ -349,18 +300,18 @@ impl TuiApp {
 
     fn cycle_sort(&mut self) {
         self.sort_mode = match self.sort_mode {
-            SortMode::None => SortMode::Time,
-            SortMode::Time => SortMode::Level,
-            SortMode::Level => SortMode::None,
+            None => Some(SortMode::Time),
+            Some(SortMode::Time) => Some(SortMode::Level),
+            Some(SortMode::Level) => None,
         };
         self.rebuild_filtered();
         let sort_name = match self.sort_mode {
-            SortMode::None => "none",
-            SortMode::Time => "time",
-            SortMode::Level => "level",
+            None => "none",
+            Some(SortMode::Time) => "time",
+            Some(SortMode::Level) => "level",
         };
         self.status_message = format!("sort: {}", sort_name);
-        self.status_color = self.theme.text_dim;
+        self.status_color = TEXT_DIM;
     }
 
     fn handle_filtering(&mut self, code: KeyCode) -> io::Result<bool> {
@@ -441,14 +392,14 @@ impl TuiApp {
         let path = Path::new(path_str);
         if !path.exists() {
             self.status_message = format!("file not found: {}", path_str);
-            self.status_color = self.theme.status_error;
+            self.status_color = STATUS_ERROR;
             return Ok(());
         }
 
         // Check if already in follow list
-        if self.follow.file_paths.iter().any(|p| p == path) {
+        if self.follow_paths.iter().any(|p| p == path) {
             self.status_message = format!("already watching: {}", path_str);
-            self.status_color = self.theme.status_warn;
+            self.status_color = STATUS_WARN;
             return Ok(());
         }
 
@@ -492,25 +443,25 @@ impl TuiApp {
         }
 
         self.rebuild_filtered();
-        self.follow.file_paths.push(path.to_path_buf());
+        self.follow_paths.push(path.to_path_buf());
         self.status_message = format!("added {} ({} entries total)", path_str, self.entries.len());
-        self.status_color = self.theme.status_ok;
+        self.status_color = STATUS_OK;
         Ok(())
     }
 
     fn toggle_follow(&mut self) {
-        if self.follow.file_paths.is_empty() {
+        if self.follow_paths.is_empty() {
             self.status_message = "no files to follow".to_string();
-            self.status_color = self.theme.status_warn;
+            self.status_color = STATUS_WARN;
             return;
         }
-        self.follow.enabled = !self.follow.enabled;
-        if self.follow.enabled {
+        self.follow_enabled = !self.follow_enabled;
+        if self.follow_enabled {
             self.status_message = "follow mode: ON (watch for new lines)".to_string();
-            self.status_color = self.theme.status_ok;
+            self.status_color = STATUS_OK;
         } else {
             self.status_message = "follow mode: OFF".to_string();
-            self.status_color = self.theme.status_warn;
+            self.status_color = STATUS_WARN;
         }
     }
 
@@ -594,7 +545,6 @@ impl TuiApp {
     }
 
     fn draw(&self, f: &mut Frame) {
-        let theme = self.theme;
         let size = f.size();
         // Give enough vertical space: 6 banner lines + 1 blank + 1 info line = 8 minimum
         let header_height = if size.height > 12 {
@@ -612,15 +562,15 @@ impl TuiApp {
             .split(size);
 
         // Header with logcli banner
-        let follow_indicator = if self.follow.is_enabled() {
+        let follow_indicator = if self.follow_enabled {
             " [FOLLOW ON]"
         } else {
             ""
         };
         let sort_indicator = match self.sort_mode {
-            SortMode::Time => " [sort: time]",
-            SortMode::Level => " [sort: level]",
-            SortMode::None => " [sort: none]",
+            Some(SortMode::Time) => " [sort: time]",
+            Some(SortMode::Level) => " [sort: level]",
+            None => " [sort: none]",
         };
 
         // Banner lines - each on its own Line to prevent overlap/corruption
@@ -629,9 +579,9 @@ impl TuiApp {
             .enumerate()
             .map(|(i, line)| {
                 let color = if i % 2 == 0 {
-                    theme.header
+                    HEADER_COLOR
                 } else {
-                    theme.header_accent
+                    HEADER_ACCENT
                 };
                 ratatui::text::Line::from(ratatui::text::Span::styled(
                     line.to_string(),
@@ -646,7 +596,7 @@ impl TuiApp {
             follow_indicator,
             sort_indicator,
             self.entries.len(),
-            self.follow.file_paths.len(),
+            self.follow_paths.len(),
         );
 
         let header_text: Vec<ratatui::text::Line> = std::iter::once(ratatui::text::Line::from(""))
@@ -656,7 +606,7 @@ impl TuiApp {
                 ratatui::text::Span::styled(
                     info_line,
                     Style::default()
-                        .fg(theme.text_bright)
+                        .fg(TEXT_BRIGHT)
                         .add_modifier(Modifier::BOLD),
                 ),
             ])))
@@ -665,11 +615,11 @@ impl TuiApp {
         let header = Paragraph::new(header_text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_active))
+                .border_style(Style::default().fg(BORDER_ACTIVE))
                 .title(ratatui::text::Span::styled(
                     " logcli ",
                     Style::default()
-                        .fg(theme.header_accent)
+                        .fg(HEADER_ACCENT)
                         .add_modifier(Modifier::BOLD),
                 )),
         );
@@ -713,15 +663,15 @@ impl TuiApp {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border))
+                    .border_style(Style::default().fg(BORDER_COLOR))
                     .title(ratatui::text::Span::styled(
                         " entries ",
-                        Style::default().fg(theme.header),
+                        Style::default().fg(HEADER_COLOR),
                     )),
             )
             .highlight_style(
                 Style::default()
-                    .bg(theme.highlight)
+                    .bg(HIGHLIGHT)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
             )
@@ -740,10 +690,10 @@ impl TuiApp {
                 let details_paragraph = Paragraph::new(details_text).block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(theme.border))
+                        .border_style(Style::default().fg(BORDER_COLOR))
                         .title(ratatui::text::Span::styled(
                             " details ",
-                            Style::default().fg(theme.header),
+                            Style::default().fg(HEADER_COLOR),
                         )),
                 );
                 f.render_widget(details_paragraph, body_chunks[1]);
@@ -752,19 +702,16 @@ impl TuiApp {
             let empty = Paragraph::new("press 'd' or Enter to view details").block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border)),
+                    .border_style(Style::default().fg(BORDER_COLOR)),
             );
             f.render_widget(empty, body_chunks[1]);
         }
 
         // Filter / status bar
         let (bar_text, bar_color) = match self.mode {
-            TuiMode::Filtering => (format!("/{}", self.filter_input), theme.text_bright),
-            TuiMode::Help => (help_text(), theme.text_bright),
-            TuiMode::FilePicker => (
-                format!("add file: {}", self.file_picker_input),
-                theme.text_bright,
-            ),
+            TuiMode::Filtering => (format!("/{}", self.filter_input), TEXT_BRIGHT),
+            TuiMode::Help => (help_text(), TEXT_BRIGHT),
+            TuiMode::FilePicker => (format!("add file: {}", self.file_picker_input), TEXT_BRIGHT),
             _ => (self.status_message.clone(), self.status_color),
         };
         let bar = Paragraph::new(ratatui::text::Span::styled(
@@ -774,10 +721,10 @@ impl TuiApp {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border_active))
+                .border_style(Style::default().fg(BORDER_ACTIVE))
                 .title(ratatui::text::Span::styled(
                     " filter / status ",
-                    Style::default().fg(theme.header),
+                    Style::default().fg(HEADER_COLOR),
                 )),
         );
         f.render_widget(bar, chunks[2]);
@@ -786,13 +733,13 @@ impl TuiApp {
 
 fn level_color(level: Level) -> Color {
     match level {
-        Level::Trace => Color::DarkGray,
-        Level::Debug => Color::Cyan,
-        Level::Info => Color::Green,
-        Level::Warn => Color::Yellow,
-        Level::Error => Color::Red,
-        Level::Fatal => Color::LightRed,
-        Level::Panic => Color::LightRed,
+        Level::Trace => LEVEL_TRACE,
+        Level::Debug => LEVEL_DEBUG,
+        Level::Info => LEVEL_INFO,
+        Level::Warn => LEVEL_WARN,
+        Level::Error => LEVEL_ERROR,
+        Level::Fatal => LEVEL_FATAL,
+        Level::Panic => LEVEL_PANIC,
     }
 }
 
@@ -992,13 +939,13 @@ mod tests {
     fn cycle_sort_changes_mode() {
         let entries = make_entries();
         let mut app = TuiApp::new(entries, make_args());
-        assert_eq!(app.sort_mode, SortMode::Time);
+        assert_eq!(app.sort_mode, Some(SortMode::Time));
         app.cycle_sort();
-        assert_eq!(app.sort_mode, SortMode::Level);
+        assert_eq!(app.sort_mode, Some(SortMode::Level));
         app.cycle_sort();
-        assert_eq!(app.sort_mode, SortMode::None);
+        assert_eq!(app.sort_mode, None);
         app.cycle_sort();
-        assert_eq!(app.sort_mode, SortMode::Time);
+        assert_eq!(app.sort_mode, Some(SortMode::Time));
     }
 
     #[test]
@@ -1006,9 +953,9 @@ mod tests {
         let entries = make_entries();
         let args = make_args();
         let mut app = TuiApp::new(entries, args);
-        assert!(!app.follow.is_enabled());
+        assert!(!app.follow_enabled);
         app.toggle_follow();
-        assert!(!app.follow.is_enabled()); // no files, so stays off
+        assert!(!app.follow_enabled); // no files, so stays off
     }
 
     #[test]
@@ -1040,7 +987,7 @@ mod tests {
         entries[2].timestamp = Some(Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 1).unwrap());
 
         let mut filtered = vec![0, 1, 2];
-        TuiApp::sort_filtered(&mut filtered[..], &entries, SortMode::Time);
+        TuiApp::sort_filtered(&mut filtered[..], &entries, Some(SortMode::Time));
         // Should be sorted: entries[1] (10:00:00), entries[2] (10:00:01), entries[0] (10:00:02)
         assert_eq!(filtered, vec![1, 2, 0]);
     }
