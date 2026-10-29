@@ -793,14 +793,15 @@ fn level_color(level: Level) -> Color {
     }
 }
 
-/// Stylized "logcli" banner (terminal-friendly ASCII art).
+/// Simple "logcli" text banner that renders in any terminal.
 fn logcli_banner() -> Vec<&'static str> {
     vec![
-        "  ___   _   _ _____  _      _____  _   _ ",
-        " |_ _| | \\ | |_   _|/ \\    | ____|| \\ | |",
-        "  | |  |  \\| | | | / _ \\   |  _|  |  \\| |",
-        "  | |  | |\\  | | |/ ___ \\  | |___ | |\\  |",
-        " |___| |_| \\_| |_/_/   \\_\\ |_____||_| \\_|",
+        "  ____        _     _       ",
+        " / ___| _ __ (_) __| | ___  ",
+        "| |  _ | '_ \\| |/ _` |/ _ \\ ",
+        "| |_| || |_) | | (_| |  __/ ",
+        " \\____|| .__/|_|\\__,_|\\___| ",
+        "     |_|                    ",
     ]
 }
 
