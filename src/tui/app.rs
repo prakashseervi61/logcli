@@ -595,14 +595,16 @@ impl TuiApp {
 
     fn draw(&self, f: &mut Frame) {
         let theme = self.theme;
+        let size = f.size();
+        let header_height = if size.height > 10 { 7 } else { 4 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(8), // header with banner
-                Constraint::Min(0),    // body
-                Constraint::Length(3), // filter bar
+                Constraint::Length(header_height), // header with banner
+                Constraint::Min(0),                // body
+                Constraint::Length(3),             // filter bar
             ])
-            .split(f.size());
+            .split(size);
 
         // Header with logcli banner
         let follow_indicator = if self.follow.is_enabled() {
@@ -616,8 +618,8 @@ impl TuiApp {
             SortMode::None => " [sort: none]",
         };
 
-        // Banner lines
-        let banner_lines: Vec<ratatui::text::Span> = logcli_banner()
+        // Banner lines - each on its own Line to prevent overlap
+        let banner_lines: Vec<ratatui::text::Line> = logcli_banner()
             .iter()
             .enumerate()
             .map(|(i, line)| {
@@ -626,16 +628,16 @@ impl TuiApp {
                 } else {
                     theme.header_accent
                 };
-                ratatui::text::Span::styled(
+                ratatui::text::Line::from(ratatui::text::Span::styled(
                     line.to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
-                )
+                ))
             })
             .collect();
 
-        // Subtitle line
+        // Subtitle line - truncated to fit terminal width
         let subtitle = format!(
-            "  {} entries  {} files  {}  (q=quit, /=filter, o=add file, s=sort, d=details, F=follow, ?=help)",
+            "{} entries  {} files  {}",
             self.entries.len(),
             self.follow.file_paths.len(),
             if self.mode == TuiMode::Filtering {
@@ -644,20 +646,31 @@ impl TuiApp {
                 ""
             }
         );
+        let help_hint = "(q=quit, /=filter, o=add file, s=sort, d=details, F=follow, ?=help)";
+        let header_line = format!(
+            "logcli TUI{}{}  {}  {}",
+            follow_indicator, sort_indicator, subtitle, help_hint
+        );
+        // Truncate header line to fit within terminal width minus borders
+        let max_width = size.width.saturating_sub(4);
+        let header_line = if header_line.len() > max_width as usize {
+            let keep = max_width.saturating_sub(3);
+            format!("{}...", &header_line[..keep as usize])
+        } else {
+            header_line
+        };
 
-        let header_text = vec![
-            ratatui::text::Line::from(banner_lines),
-            ratatui::text::Line::from(""),
-            ratatui::text::Line::from(vec![
+        let header_text: Vec<ratatui::text::Line> = std::iter::once(ratatui::text::Line::from(""))
+            .chain(banner_lines)
+            .chain(std::iter::once(ratatui::text::Line::from(vec![
                 ratatui::text::Span::styled(
-                    format!("logcli TUI{follow_indicator}{sort_indicator}"),
+                    header_line,
                     Style::default()
                         .fg(theme.text_bright)
                         .add_modifier(Modifier::BOLD),
                 ),
-                ratatui::text::Span::styled(subtitle, Style::default().fg(theme.text_dim)),
-            ]),
-        ];
+            ])))
+            .collect();
 
         let header = Paragraph::new(header_text).block(
             Block::default()
