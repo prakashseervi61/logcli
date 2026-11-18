@@ -302,7 +302,7 @@ impl Literal {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Op {
     Eq,
     Ne,
@@ -318,14 +318,14 @@ pub enum Op {
     NotLike(Regex),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SetRef {
     Inline(Vec<Literal>),
     File { path: String },
     Stdin { offset: usize, query: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Bool(bool),
     And(Box<Expr>, Box<Expr>),
@@ -732,6 +732,7 @@ mod tests {
             consumed: Vec::new(),
             raw: String::new(),
             format: Format::Json,
+            redacted: false,
         }
     }
 

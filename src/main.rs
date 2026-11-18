@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod config;
 mod error;
 mod filter;
 mod input;

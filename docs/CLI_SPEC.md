@@ -1,7 +1,7 @@
 # CLI Specification — `logcli`
 
-**Status:** Draft v0.1
-**Related:** [PRD.md](PRD.md) · [QUERY_SPEC.md](QUERY_SPEC.md) · [CONFIG.md](CONFIG.md)
+**Status:** Draft v0.2
+**Related:** [PRD.md](PRD.md) · [QUERY_SPEC.md](QUERY_SPEC.md) · [CONFIG.md](CONFIG.md) · [CONTRIBUTING.md](../CONTRIBUTING.md)
 
 This document is the contract for the command-line interface. Any behavior not described here is unspecified. All examples in this file must be covered by integration tests (see [TEST_PLAN.md](TEST_PLAN.md)).
 
@@ -15,12 +15,13 @@ This document is the contract for the command-line interface. Any behavior not d
 logcli [OPTIONS] [FILE]...
 ```
 
-- With no `FILE` and a TTY stdin: print help and exit `0`.
-- With no `FILE` and non-TTY stdin: read stdin.
+- With no `FILE` and a TTY stdin: auto-launch TUI (`--tui`).
+- With no `FILE` and non-TTY stdin: read stdin in batch mode.
 - `-` as a file name means stdin.
-- Multiple files are processed in the order given unless `--sort` or `--follow` is used.
+- Multiple files are processed in order given unless `--sort` or `--follow` is used.
+- Config files are auto-discovered (see [CONFIG.md](CONFIG.md)) unless `--config` disables or overrides.
 
-**Reserved for future use:** subcommands (`stats`, `completion` if moved out of flags). If a first positional argument matches a reserved word, it is still treated as a file path in v1; document this.
+**Reserved for future use:** subcommands (`stats`, `completion` if moved out of flags).
 
 ---
 
@@ -29,15 +30,16 @@ logcli [OPTIONS] [FILE]...
 | Code | Meaning |
 |---|---|
 | `0` | Success, including zero matched entries |
-| `1` | Usage error (bad flag, invalid query, missing value) |
+| `1` | Usage error (bad flag, invalid query, invalid config) |
 | `2` | I/O error (file missing, permission denied, decompression failure) |
 | `3` | Broken pipe (SIGPIPE equivalent); silent, no error message |
 | `130` | Interrupted by Ctrl-C |
+| `N` (configured) | Alert threshold breach (exit code from `alerts:` config rule) |
 
 Rules:
 - Filtering that yields no results is **not** an error.
 - Malformed individual log lines are **not** fatal; they are counted and skipped.
-- `--strict` (P2) would turn parse warnings into exit `2`.
+- Alert breach exits with the rule's `exit_code` (default 2).
 
 ---
 
@@ -46,10 +48,10 @@ Rules:
 | Flag | Value | Default | Description |
 |---|---|---|---|
 | `--config <FILE>` | path | auto | Config file(s), repeatable. `-` disables config loading. |
+| `--shell-completions <SHELL>` | bash/zsh/fish/powershell/elvish | | Print completion script and exit. |
+| `--man-page` | | | Print man page and exit. (P2) |
 | `-V, --version` | | | Print version and exit. |
 | `--help[=short\|long]` | | `short` | Print help. |
-| `--shell-completions <SHELL>` | bash/zsh/fish/powershell/elvish | | Print completion script and exit. (P2) |
-| `--man-page` | | | Print man page and exit. (P2) |
 
 ### Environment variables
 
@@ -61,7 +63,7 @@ CLI options map to env vars with a `LOGCLI_` prefix (see [CONFIG.md](CONFIG.md))
 
 | Flag | Value | Default | Description |
 |---|---|---|---|
-| `--input-format <F>` | `auto` \| `json` \| `logfmt` | `auto` | Force a parser. `auto` detects per line. |
+| `--input-format <F>` | `auto` \| `json` \| `logfmt` \| `plain` \| `otel` | `auto` | Force a parser. `auto` detects per line. `otel` parses OpenTelemetry OTLP JSON. |
 | `--delimiter <D>` | `auto` \| `lf` \| `crlf` \| `cr` \| `nul` | `auto` | Entry delimiter. `auto` sniffs the first 64 KiB. |
 | `--allow-prefix` | | off | Allow non-JSON text before a JSON object. |
 | `--unix-timestamp-unit <U>` | `auto` \| `s` \| `ms` \| `us` \| `ns` | `auto` | How to interpret numeric timestamps. |
@@ -85,9 +87,9 @@ CLI options map to env vars with a `LOGCLI_` prefix (see [CONFIG.md](CONFIG.md))
 
 ### 5.1 Level values
 
-Accepted (case-insensitive): `trace, debug, info, warn, warning, error, fatal, panic`, plus one-letter aliases `t d i w e f`. Numeric levels accepted when the source uses them.
+Accepted (case-insensitive): `trace, debug, info, warn, warning, error, fatal, panic`, plus one-letter aliases `t d i w e f`. Numeric levels accepted when the source uses them. OTel `SeverityNumber` 1-24 is mapped per OpenTelemetry spec.
 
-**Semantics:** threshold, not set membership. `-l w` = warn + error + fatal.
+**Semantics:** threshold, not set membership. `-l w` = warn + error + fatal + panic.
 
 ### 5.2 Time expressions
 
@@ -125,7 +127,7 @@ Full grammar and semantics: [QUERY_SPEC.md](QUERY_SPEC.md).
 |---|---|---|---|
 | `--color [WHEN]` | `auto` \| `always` \| `never` | `auto` | Color mode. |
 | `-c` | | | Alias for `--color=always`. |
-| `--theme <NAME>` | theme name | `uni` | Color theme. |
+| `--theme <NAME>` | theme name | `default` | Color theme (`default`, `monokai`, `solarized`). |
 | `-h, --hide <KEY>` | field key, `!key`, `*`, `!*` | none | Repeatable. `!` reveals. |
 | `--flatten <WHEN>` | `always` \| `never` | `always` | Flatten nested objects into dotted keys. |
 | `-t, --time-format <F>` | strftime-like | `%Y-%m-%d %T.%3N` | Timestamp format. |
@@ -137,38 +139,97 @@ Full grammar and semantics: [QUERY_SPEC.md](QUERY_SPEC.md).
 | `--ascii [WHEN]` | `auto` \| `always` \| `never` | `auto` | ASCII-only punctuation. |
 | `--input-info <LAYOUT>` | `auto` \| `none` \| `minimal` \| `compact` \| `full` | `auto` | Show file/line info. |
 | `-o, --output <FILE>` | path | stdout | Write here. `-` = stdout. |
+| `--output-format <FORMAT>` | `formatted` \| `raw` \| `json` \| `csv` \| `prometheus` | `formatted` | Export format. |
 | `--output-delimiter <D>` | `newline` \| `nul` | `newline` | Entry terminator. |
 | `-r, --raw` | | off | Emit raw source lines (matched entries). |
 | `--raw-fields` | | off | Do not unescape/prettify field values. |
 | `--paging <WHEN>` | `auto` \| `always` \| `never` | `auto` | Pager control. |
 | `-P` | | | Alias for `--paging=never`. |
 
-**Color auto rule:** color if stdout is a TTY and `NO_COLOR` is unset/empty and `TERM != "dumb"`. `CLICOLOR=0` respected. `--color=always` still honors `NO_COLOR`? **No** — explicit `always` overrides `NO_COLOR`; document this.
+**Color auto rule:** color if stdout is a TTY and `NO_COLOR` is unset/empty and `TERM != "dumb"`. `CLICOLOR=0` respected. `--color=always` overrides `NO_COLOR`.
 
-**Pager auto rule:** invoke pager only when stdout is a TTY, output is not a file, and paging != `never`. Pager command from `LOGCLI_PAGER`, then `PAGER`, then `less -R` (Windows: `less -R` if present, else no pager).
+**Pager auto rule:** invoke pager only when stdout is a TTY, output is not a file, and paging != `never`. Pager command from `LOGCLI_PAGER`, then `PAGER`, then `less -R` (Windows: `less -R` if on `PATH`, else no pager).
 
 ---
 
-## 7. Sorting & Follow
+## 7. Output Formats
+
+| Format | Flag | Best for |
+|---|---|---|
+| `formatted` (default) | `-o out.txt` | Human reading in terminal |
+| `raw` | `--output-format raw -o out.log` | Exact source passthrough |
+| `json` | `--output-format json -o out.jsonl` | Downstream JSON tools (JSON Lines) |
+| `csv` | `--output-format csv -o report.csv` | Spreadsheets / Excel |
+| `prometheus` | `--output-format prometheus -o metrics.prom` | Prometheus scrape targets |
+
+### 7.1 CSV format
+
+Each entry is flattened into dotted keys (`fields.request.method`, `timestamp`, `level`, `message`, `logger`). Header row lists all keys found across matched entries. Values containing `,`, `"`, newlines, or CR are quoted per RFC 4180.
+
+### 7.2 Prometheus format
+
+Each matched entry emits:
+```
+logcli_total{service="api",namespace="prod"} 1 <timestamp_ms>
+```
+Labels are taken from fields `service`, `namespace`, `environment`, `component`. Timestamp is milliseconds since epoch (or 0 if no timestamp).
+
+---
+
+## 8. TUI Options
 
 | Flag | Value | Default | Description |
 |---|---|---|---|
-| `-s, --sort` | | off | Chronological merge of all inputs. |
-| `-F, --follow` | | off | Follow inputs; implies sorted output. |
-| `--tail <N>` | integer | `10` | Preload last N entries per file in follow mode. |
-| `--sync-interval-ms <MS>` | integer | `100` | Merge window for follow mode. |
-| `--index-dir <PATH>` | path | OS cache dir | Where sort indexes live. |
-| `--no-index` | | off | In-memory sort only (bounded by `--max-memory`). |
-| `--dump-index` | | off | Print index metadata and exit (debug). |
+| `--tui` | | off (auto if no files + TTY stdin) | Launch interactive TUI dashboard. |
+| `--follow` \| `-F` | | off | Tail new lines in files (implies sorted output). |
+
+### TUI keybindings
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Scroll up/down |
+| `g`/`G` | Go to top/bottom |
+| `/` | Open filter prompt |
+| `Esc` | Clear the active filter |
+| `d`/`Enter` | Focus the details pane (scroll with `j`/`k`) |
+| `o` | Add a log file (enter path) |
+| `s` | Cycle sort (none / time / level) |
+| `f`/`F` | Toggle follow mode |
+| `h` | Toggle histogram view |
+| `?` | Show help |
+| `q` | Quit |
+
+Layout: boxed header (`logcli` version, source, ERRORS/WARNs/INFO counts);
+entries table (`TIMESTAMP`, `LEVEL`, `MESSAGE`) with an always-visible JSON
+details pane to its right; filter/status box beneath the table; key-hint bar
+with the current `Matches: filtered/total` count at the bottom right.
 
 Rules:
-- `--sort` and `--follow` are mutually exclusive; `-F` implies sorting.
+- `--sort` and `--follow` are mutually exclusive in batch mode; `-F` implies sorting.
 - `-F` implies `--paging=never`.
-- Entries without a parseable timestamp are placed at the end in sort mode and counted in the summary shown to stderr when `--verbose`.
+- Entries without a parseable timestamp are placed at the end in sort mode.
 
 ---
 
-## 8. Advanced Options
+## 9. PII Redaction & Alert Rules (via config)
+
+PII redaction and alert rules are configured in the config file (see [CONFIG.md](CONFIG.md)), not via CLI flags. Example:
+
+```yaml
+redact:
+  - field: "message"
+    pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+    replace: "[EMAIL]"
+alerts:
+  - name: "high_error_rate"
+    query: "level = error and status >= 500"
+    threshold: 10
+    exit_code: 2
+```
+
+---
+
+## 10. Advanced Options
 
 | Flag | Value | Default | Description |
 |---|---|---|---|
@@ -176,52 +237,52 @@ Rules:
 | `--interrupt-ignore-count <N>` | integer | `3` | Ctrl-C presses ignored before exit. |
 | `--list-themes[=TAGS]` | tags | | List themes; tags: `dark,light,16color,256color,truecolor,base,overlay`. |
 | `-v, --verbose` | | off | Diagnostics to stderr (skipped lines, timings). |
-| `-q, --quiet` | | off | Suppress non-fatal warnings. (Careful: `-q` is query! Use `--silent` instead.) |
+| `--silent` | | off | Suppress non-fatal warnings and summary. |
 
-> **Conflict resolved:** `-q` is reserved for `--query` (matching hl). Quiet mode uses `--silent` only. This avoids an ambiguity that exists in hl.
+> **Note:** `-q` is reserved for `--query` (matching `hl`). Quiet mode uses `--silent` only.
 
 ---
 
-## 9. Behavior Details
+## 11. Behavior Details
 
-### 9.1 stdin
+### 11.1 stdin
 - `logcli` with piped stdin reads until EOF.
 - In follow mode, stdin input is supported; EOF ends that source only if it is not a file being watched.
 - Broken pipe (reader exits early) → exit `3`, no stack trace, no error text.
 
-### 9.2 Multiple files
+### 11.2 Multiple files
 - Output preserves per-file order unless `--sort`.
 - `--input-info` prefixes entries when more than one input is active.
-- A missing file is a fatal I/O error (exit `2`) unless `--ignore-missing` (P2).
+- A missing file is a fatal I/O error (exit `2`).
 
-### 9.3 Malformed lines
+### 11.3 Malformed lines
 - Skipped by default; count printed to stderr only with `--verbose`.
 - `--allow-prefix` increases successful parse rate for prefixed logs.
 - A line exceeding `--max-entry-size` is skipped with a warning.
 
-### 9.4 Timezone
+### 11.4 Timezone
 - Timestamps are normalized to UTC internally.
 - Output defaults to UTC; `-L` switches to local; `-Z` accepts IANA names such as `Europe/Berlin`.
 - Invalid timezone → exit `1`.
 
-### 9.5 Color and themes
+### 11.5 Color and themes
 - Themes only affect TTY-formatted output; raw mode is never colorized.
 - `--theme` with unknown name → exit `1`, listing nearest matches.
 
-### 9.6 Piping guarantees
+### 11.6 Piping guarantees
 - When stdout is not a TTY, defaults change: no pager, no color, `--input-info=none` unless explicitly set.
 - Output is line-buffered when TTY, block-buffered otherwise.
 - No ANSI codes ever when `--color=never`.
 
 ---
 
-## 10. Examples (normative)
+## 12. Examples (normative)
 
 ```sh
 # Read a file (pager auto on TTY)
 logcli app.log
 
-# Read compressed logs
+# Read compressed logs (gzip)
 logcli app.log.gz
 
 # Only errors and above
@@ -242,7 +303,7 @@ logcli --since -3h --until now app.log
 # Merge two files chronologically, errors only
 logcli -s -l w api.log worker.log
 
-# Live follow with 200-line preload
+# Live follow with preload
 logcli -F --tail 200 app.log
 
 # Pipe from kubectl
@@ -259,11 +320,29 @@ logcli -f 'span.[].name=sp0001' trace.log
 
 # Preserve only provider field
 logcli --hide '*' --hide '!provider' app.log
+
+# OpenTelemetry OTLP logs
+logcli --input-format otel otel.log
+
+# Export to Prometheus for scraping
+logcli --output-format prometheus -o metrics.prom app.log
+
+# Export to CSV for spreadsheets
+logcli --output-format csv -o report.csv app.log
+
+# Interactive TUI dashboard
+logcli --tui app.log
+
+# Follow a live log file
+logcli -F -l error app.log
+
+# Shell completions
+logcli --shell-completions bash > /etc/bash_completion.d/logcli
 ```
 
 ---
 
-## 11. Error Message Format
+## 13. Error Message Format
 
 All errors go to stderr, prefixed with `logcli: error: `. Usage errors are followed by a hint:
 
@@ -284,4 +363,11 @@ Query parse errors include a caret position:
 logcli: error: invalid query at column 12: expected ')' after expression
   level > info and (status >=
                     ^
+```
+
+Alert breach:
+
+```
+logcli: alert: high_error_rate triggered (12 entries matched)
+logcli: error: alert threshold exceeded (exit 2)
 ```

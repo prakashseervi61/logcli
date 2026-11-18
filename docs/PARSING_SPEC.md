@@ -1,41 +1,45 @@
 # Parsing Specification — `logcli`
 
-**Status:** Draft v0.1
+**Status:** Draft v0.2
 **Related:** [DESIGN.md](DESIGN.md) · [QUERY_SPEC.md](QUERY_SPEC.md) · [TEST_PLAN.md](TEST_PLAN.md)
 
 This document defines exactly how bytes on disk become a normalized `Entry`. Anything ambiguous here becomes a bug later, so rules are stated explicitly and paired with fixtures in `tests/fixtures/`.
 
 ---
 
-## 1. Supported Input Formats (v1)
+## 1. Supported Input Formats (v0.2)
 
 | Format | Priority | Detection |
 |---|---|---|
 | JSON / JSONL | P0 | First non-space byte is `{` and the line parses as an object |
+| OpenTelemetry OTLP JSON | P0 | JSON object containing `resourceLogs` key |
 | logfmt | P0 | Line matches `key=value` pairs for at least one pair, no `{` prefix |
 | Plain text | P0 | Fallback; entire line becomes `message`, no fields |
 | Apache/Nginx combined | P1 | Line starts with an IP and contains `"METHOD path HTTP/x"` |
 | Syslog RFC5424 | P1 | `<PRI>1 ` prefix |
 | Syslog RFC3164 | P2 | `<PRI>MMM dd hh:mm:ss` prefix |
 
-v1 ships JSON, logfmt, and plain text. Apache/Nginx and syslog are additive parsers with identical interfaces.
+v0.2 ships JSON, logfmt, plain text, and OTLP. Apache/Nginx and syslog are additive parsers with identical interfaces.
 
 ---
 
 ## 2. Entry Delimiting
 
 ### 2.1 Delimiters
+
 - `--delimiter auto` sniffs the first 64 KiB:
   - If `\0` appears at least once per ~1 KiB and `\n` is rare → `nul`.
   - Count `\r\n`, lone `\n`, lone `\r`; most frequent wins. Default `lf`.
 - Splitter never splits inside a quoted JSON string when `--input-format=json`? **No** — JSON logs are line-delimited by contract. Multi-line JSON is only supported via `--allow-prefix` + brace balancing on a single logical line, not across records.
 
 ### 2.2 Size limits
+
 - An entry longer than `--max-entry-size` (default 64 MiB) is skipped.
 - The splitter must not allocate more than `max-entry-size + buffer` for a single entry.
 - Skipped oversized entries increment `stats.oversized` and emit a warning in `--verbose`.
 
 ### 2.3 Encoding
+
 - Input is treated as bytes. Invalid UTF-8 is handled with `String::from_utf8_lossy` at display time; matching operates on bytes where possible.
 - BOM at the start of a file is stripped once.
 
@@ -49,15 +53,20 @@ Detection is per line, with a per-source memo (first 20 lines vote; majority win
 detect(line):
   skip leading ASCII whitespace
   if first byte == '{':
-      if parses as JSON object          -> JSON
-      if --allow-prefix and contains '{' that starts a valid object -> JSON (prefixed)
+      if parses as JSON object:
+          if contains key "resourceLogs":
+              -> OTLP
+          else:
+              -> JSON
+      if --allow-prefix and contains '{' that starts a valid object:
+          -> JSON (prefixed)
   if line contains regex \b[a-zA-Z_][\w.-]*=  -> LOGFMT
   if --allow-prefix                       -> try prefix scan
   else                                    -> PLAIN
 ```
 
 Rules:
-- A successful JSON array at top level is treated as a **single entry** with a synthetic field `_array` (P2) or as invalid in v1. v1: JSON arrays are invalid log lines → skipped.
+- A successful JSON array at top level is treated as a **single entry** with a synthetic field `_array` (P2) or as invalid in v0.2. v0.2: JSON arrays are invalid log lines → skipped.
 - If `--input-format` is set, detection is bypassed entirely.
 - Detection failures are never fatal.
 
@@ -66,6 +75,7 @@ Rules:
 ## 4. JSON Parsing
 
 ### 4.1 Requirements
+
 - Preserve nested objects and arrays.
 - Preserve key order.
 - Preserve number text where possible (avoid float rounding for IDs).
@@ -74,10 +84,12 @@ Rules:
 - Accept both single-line JSON and JSON with internal newlines only when the whole entry parses (i.e. the delimiter splitter yielded it as one unit — relevant for NUL-delimited input).
 
 ### 4.2 Prefix handling (`--allow-prefix`)
+
 Input such as:
 ```
 2026-10-28T10:00:00Z INFO starting {"level":"info","msg":"ready"}
 ```
+
 Rules:
 - Scan forward for the first `{` that begins a balanced JSON object, accounting for strings and escapes.
 - Bytes before it are discarded from field extraction but retained for `--raw`.
@@ -85,18 +97,81 @@ Rules:
 - Prefix scanning is O(n) and bounded by `--max-entry-size`.
 
 ### 4.3 Duplicate keys
+
 - Last value wins for evaluation; both occurrences remain visible in insertion order for display? **Decision:** last wins everywhere; display shows last only. Documented to avoid ambiguity.
 
 ### 4.4 Null and empty
+
 - `null` is preserved as `Value::Null`.
 - `-e` hides null, empty strings, empty arrays, and empty objects.
 - Field existence (`exists()`) treats `null` as **existing** (presence, not truthiness).
 
 ---
 
-## 5. logfmt Parsing
+## 5. OpenTelemetry OTLP Parsing (`--input-format otel`)
 
-### 5.1 Grammar
+### 5.1 Expected structure
+
+```json
+{
+  "resourceLogs": [{
+    "resource": { "attributes": [...] },
+    "scopeLogs": [{
+      "scope": { "attributes": [...] },
+      "logRecords": [{
+        "timeUnixNano": "1761646530000000000",
+        "severityNumber": 17,
+        "severityText": "ERROR",
+        "body": { "stringValue": "connection failed" },
+        "attributes": [...]
+      }]
+    }]
+  }]
+}
+```
+
+### 5.2 Mapping rules
+
+| OTLP field | Entry field | Notes |
+|---|---|---|
+| `resourceLogs[].resource.attributes[].key/value` | `fields.*` | Resource attributes merged into entry fields |
+| `resourceLogs[].scopeLogs[].scope.attributes[].key/value` | `fields.*` | Scope attributes merged into entry fields |
+| `resourceLogs[].scopeLogs[].logRecords[].attributes[].key/value` | `fields.*` | Record attributes merged into entry fields |
+| `timeUnixNano` | `timestamp` | Nanoseconds since epoch → `DateTime<Utc>` |
+| `severityText` | `level` | String level (INFO, ERROR, etc.) |
+| `severityNumber` | `fields.severity_number` | Numeric level 1-24 per OTel spec |
+| `body.stringValue` | `message` | The log message |
+| `body` (non-string) | `fields.body` | Structured body preserved as JSON |
+
+### 5.3 SeverityNumber mapping
+
+| SeverityNumber | Range name | Level |
+|---|---|---|
+| 1-4 | TRACE | Trace |
+| 5-8 | DEBUG | Debug |
+| 9-12 | INFO | Info |
+| 13-16 | WARN | Warn |
+| 17-20 | ERROR | Error |
+| 21-24 | FATAL | Fatal |
+| 0 | Unspecified | None |
+
+If both `severityText` and `severityNumber` are present, `severityText` takes precedence for `level`; `severityNumber` is stored in `fields.severity_number`.
+
+### 5.4 Batching
+
+OTLP batches multiple `logRecords` per line. v0.2 emits **only the first log record** found and ignores the rest. This is documented behavior; full batch emission is a roadmap item.
+
+### 5.5 Missing fields
+
+- Missing `timeUnixNano` → `timestamp = None`.
+- Missing `severityText`/`severityNumber` → `level = None`.
+- Missing `body` → `message = None`, raw line is preserved.
+
+---
+
+## 6. logfmt Parsing
+
+### 6.1 Grammar
 
 ```
 logfmt   := pair (SP pair)* SP?
@@ -109,7 +184,8 @@ quoted-string := '"' ( esc | [^"\\] )* '"'
 esc      := '\\' ( '"' | '\\' | 'n' | 't' | 'r' )
 ```
 
-### 5.2 Rules
+### 6.2 Rules
+
 - Without quotes, values end at whitespace.
 - Quoted values may contain spaces and escaped quotes/newlines.
 - A token without `=` is ignored but counted as `stats.logfmt_stray_tokens` (verbose).
@@ -118,7 +194,7 @@ esc      := '\\' ( '"' | '\\' | 'n' | 't' | 'r' )
 - Keys are case-sensitive.
 - Numeric-looking values remain strings unless a comparator requires numeric coercion (see QUERY_SPEC §7).
 
-### 5.3 Examples
+### 6.3 Examples
 
 | Input | Result |
 |---|---|
@@ -130,9 +206,10 @@ esc      := '\\' ( '"' | '\\' | 'n' | 't' | 'r' )
 
 ---
 
-## 6. Timestamp Extraction
+## 7. Timestamp Extraction
 
-### 6.1 Field keys (in order)
+### 7.1 Field keys (in order)
+
 Configurable via `timestamp-keys`, default:
 1. `timestamp`
 2. `time`
@@ -143,7 +220,8 @@ Configurable via `timestamp-keys`, default:
 
 Nested access is allowed (`event.time`).
 
-### 6.2 Accepted formats
+### 7.2 Accepted formats
+
 | Shape | Example | Notes |
 |---|---|---|
 | RFC3339 / ISO8601 | `2026-10-28T10:15:30.123Z`, `+05:30` | Primary |
@@ -155,57 +233,68 @@ Nested access is allowed (`event.time`).
 | Unix millis | `1761646530123` | 13 digits |
 | Unix micros | `1761646530123456` | 16 digits |
 | Unix nanos | `1761646530123456789` | 19 digits |
+| OTel `timeUnixNano` | `"1761646530000000000"` | Via `--input-format otel` |
 
-### 6.3 Unit inference (`--unix-timestamp-unit auto`)
+### 7.3 Unit inference (`--unix-timestamp-unit auto`)
+
 - Length 10 → seconds; 13 → millis; 16 → micros; 19 → nanos.
 - Values with a decimal point are seconds (float).
 - Otherwise: if `value < 10^11` → seconds; `< 10^14` → millis; `< 10^17` → micros; else nanos.
 - Explicit `--unix-timestamp-unit` always wins.
 
-### 6.4 Missing timestamps
+### 7.4 Missing timestamps
+
 - Entry has `timestamp = None`.
 - Sorting places these at the end (stable by source/offset).
 - `--since`/`--until` **exclude** entries without timestamps.
 
-### 6.5 Timezone
+### 7.5 Timezone
+
 - Internally `DateTime<Utc>`.
 - Naive timestamps default to UTC; config key `assume-timezone` (P2) can change this.
 - `-Z` / `-L` affect **display only**.
 
 ---
 
-## 7. Level Extraction
+## 8. Level Extraction
 
-### 7.1 Field keys (in order)
+### 8.1 Field keys (in order)
+
 `level`, `lvl`, `severity`, `severity_text`, `log.level`, `@level`.
 
-### 7.2 Normalization
+### 8.2 Normalization
+
 | Input | Normalized |
 |---|---|
 | `trace`, `trc`, `t` | Trace |
 | `debug`, `dbg`, `d` | Debug |
 | `info`, `inf`, `i`, `informational`, `notice` | Info |
 | `warn`, `warning`, `wrn`, `w` | Warn |
-| `error`, `err`, `e`, `eror`? | Error |
-| `fatal`, `ftl`, `crit`, `critical`, `alert`, `emerg` | Fatal |
+| `error`, `err`, `e` | Error |
+| `fatal`, `ftl`, `crit`, `critical`, `alert`, `emerg`, `emergency` | Fatal |
 | `panic` | Panic |
-| `10`,`20` (syslog) | map per RFC5424: 0–3 Fatal, 4 Error, 5–6 Warn, 7 Info |
-| `0..6` (log4j-ish) | 0 Fatal … 6 Trace? **No** — ambiguous; treat as unknown unless config maps |
+| OTel `severityNumber` 1-4 | Trace |
+| OTel `severityNumber` 5-8 | Debug |
+| OTel `severityNumber` 9-12 | Info |
+| OTel `severityNumber` 13-16 | Warn |
+| OTel `severityNumber` 17-20 | Error |
+| OTel `severityNumber` 21-24 | Fatal |
 
 Comparison is case-insensitive and trimmed. Unknown strings → `Level::Other`, displayed as-is but sorted below Trace.
 
-### 7.3 Threshold semantics (`--level`)
+### 8.3 Threshold semantics (`--level`)
+
 `trace < debug < info < warn < error < fatal < panic`
 
 `-l w` matches warn, error, fatal, panic. Unknown levels match only if the threshold is not set.
 
 ---
 
-## 8. Message, Logger, Caller
+## 9. Message, Logger, Caller
 
 | Role | Default keys (in order) | Fallback |
 |---|---|---|
-| message | `message`, `msg`, `log`, `@message` | plain text line |
+| message | `message`, `msg`, `log`, `@message`, `body.stringValue` (OTLP) | plain text line |
 | logger | `logger`, `source`, `service`, `@logger` | none |
 | caller | `caller`, `file`, `source.file` | none |
 
@@ -215,7 +304,7 @@ Comparison is case-insensitive and trimmed. Unknown strings → `Level::Other`, 
 
 ---
 
-## 9. Multi-line Handling
+## 10. Multi-line Handling
 
 - A single entry containing embedded `\n` (from JSON strings or escaped logfmt values) is controlled by `-x`:
   - `never`: escape as `\n`, single line.
@@ -226,28 +315,28 @@ Comparison is case-insensitive and trimmed. Unknown strings → `Level::Other`, 
 
 ---
 
-## 10. Compression
+## 11. Compression
 
-| Format | Magic | Crate |
-|---|---|---|
-| gzip | `1f 8b` | `flate2` |
-| zstd | `28 b5 2f fd` | `zstd` |
-| bzip2 | `42 5a 68` | `bzip2` |
-| xz | `fd 37 7a 58 5a 00` | `xz2` |
+| Format | Magic | Crate | Status |
+|---|---|---|---|
+| gzip | `1f 8b` | `flate2` | Implemented |
+| zstd | `28 b5 2f fd` | `zstd` | Roadmap |
+| bzip2 | `42 5a 68` | `bzip2` | Roadmap |
+| xz | `fd 37 7a 58 5a 00` | `xz2` | Roadmap |
 
 - Detection is by magic bytes, never extension.
 - Decompression errors are fatal for that source (exit 2) and name the file.
 - Concatenated gzip members are supported.
-- `.zst` files with skippable frames are supported per zstd spec.
 
 ---
 
-## 11. Malformed Input Policy
+## 12. Malformed Input Policy
 
 | Situation | Behavior |
 |---|---|
 | Invalid JSON line | Skip; increment `invalid`; verbose warning |
 | Trailing garbage after JSON | Same as invalid unless `--allow-prefix` accepts a prefix |
+| OTLP without `resourceLogs` | Skip; increment `invalid` |
 | logfmt with no pairs | Falls back to plain text |
 | Oversized line | Skip; increment `oversized` |
 | Invalid UTF-8 | Lossy conversion; not an error |
@@ -256,12 +345,13 @@ Comparison is case-insensitive and trimmed. Unknown strings → `Level::Other`, 
 
 ---
 
-## 12. Fixtures (required)
+## 13. Fixtures (required)
 
 | File | Purpose |
 |---|---|
 | `fixtures/simple.jsonl` | 100 varied JSON entries |
 | `fixtures/nested.jsonl` | Objects, arrays, dotted keys |
+| `fixtures/otel.jsonl` | OpenTelemetry OTLP log records |
 | `fixtures/logfmt.log` | Quoted values, escapes, stray tokens |
 | `fixtures/mixed.log` | JSON + logfmt + plain interleaved |
 | `fixtures/prefixed.log` | `timestamp LEVEL {json}` lines |

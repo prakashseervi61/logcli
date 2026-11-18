@@ -1,47 +1,36 @@
 # logcli
 
-Fast, local-first log viewer and processor for **JSON** and **logfmt** logs — inspired by [hl](https://github.com/pamburus/hl).
+Fast, local-first log viewer and processor for **JSON**, **logfmt**, **plain text**, and **OpenTelemetry OTLP** logs — inspired by [hl](https://github.com/pamburus/hl) and [lnav](https://github.com/tstack/lnav).
 
-> **Status:** v0.2. Query language and interactive TUI implemented. JSON/logfmt/plain parsing, field/level/time
-> filtering, formatted and raw output, gzip input, in-memory sorting, the full `-q` boolean query language, and
-> the `--tui` interactive dashboard work and are covered by tests.
-> Pager, themes, zstd/bzip2/xz, and index-backed sorting are **not implemented** in this build.
+> **Status:** v0.2.0. Query language, interactive TUI, declarative config, PII redaction, alert rules, multi-format export, OpenTelemetry parsing, pager integration, shell completions, theming, and compressed log support all work and are covered by tests.
+>
+> Native database index, AI natural-language queries, web UI, and OTLP receiver are **roadmap** items for v0.3.0.
 
 ## Why
 
-`grep` doesn't understand structured logs; observability platforms need infrastructure. `logcli` reads a multi-GB
-log file locally, filters it precisely, and renders it clearly — while remaining fully pipeable.
+`grep` doesn't understand structured logs; observability platforms need infrastructure. `logcli` reads logs locally, filters them precisely, renders them clearly — and stays fully pipeable. It runs with **no Docker at runtime** (native `logcli.exe` on Windows), so you can triage production logs straight from your terminal.
 
-## Features
+## 2027-ready features
 
-Implemented in v0.2.0:
-
-- **Formats:** JSON/JSONL, logfmt, and plain text, with auto-detection per line.
-- **Compression:** gzip (including multi-member `.gz`), detected by magic bytes.
-- **Filters:** `-l/--level` threshold, `-f/--filter` field filters
-  (`=`, `!=`, `~=`, `!~=`, `~~=`, `!~~=`, plus the `key?` absent-field modifier),
-  and `--since`/`--until` with RFC 3339, `YYYY-MM-DD`, `now`, `today`, `yesterday`, and `-3h`/`-14d` offsets.
-- **Queries:** `-q/--query` boolean query language — `and`/`or`/`not`, parentheses, comparisons with
-  aliases (`eq`, `ne`, `gt`, `ge`, `lt`, `le`, `contain`, `match`), `in (...)`, `like`/`not like` wildcards,
-  `exists(...)`, the absent-field `?` modifier, and value sets via `in @file` / `in @-`. Multiple queries and
-  `-f` filters are ANDed.
-- **Field paths:** nested paths (`request.method`), array wildcards (`span.[].name`), and indexes (`span.[0].name`).
-- **Output:** aligned time/level/message columns, color when the output is a TTY, `NO_COLOR` support,
-  `-h/--hide` (with `!` reveal and `*`), `-e/-E` empty-field control, `-x` expansion modes,
-  `-t` time format, `-Z`/`-L` time zones, `-r` raw passthrough, `-o` file output, NUL-delimited output.
-- **Input handling:** stdin or `-`, multiple files, LF/CRLF/CR/NUL delimiters, `--allow-prefix` for prefixed JSON,
-  `--max-entry-size` guard.
-- **Sorting:** `-s` chronological merge across files (in-memory).
-- **Errors:** deterministic exit codes (`0` success, `1` usage/query, `2` I/O, `3` broken pipe, `130` interrupted).
-- **Interactive TUI:** `--tui` launches a full-screen dashboard with scrollable log list, color-coded levels,
-  live query filtering (`/`), details view (`d`), follow mode toggle (`F`), and help (`?`).
-
-Planned but not in this build: pager integration, themes, zstd/bzip2/xz, and index-backed external sorting.
-See [PLAN.md](PLAN.md).
+| Feature | Flag / Config | What it does |
+|---------|---------------|--------------|
+| Boolean query language | `-q 'expr'` | `and`/`or`/`not`, parentheses, `in (...)`, `like`, `exists(...)`, `?` absent modifier |
+| Declarative config | `logcli.yaml/json/toml` or `--config` | Saved filters, queries, level, time range, redaction, alerts — no flag soup |
+| PII redaction | `redact:` in config | Mask emails, phones, IDs across message/logger/caller/fields |
+| Alert rules | `alerts:` in config | Exit with code when query matches N entries (great for CI/sidecar) |
+| Multi-format export | `-o` + `--output-format` | `formatted`, `raw`, `json`, `csv`, `prometheus` |
+| OpenTelemetry OTLP | `--input-format otel` | Parse `resourceLogs` / `scopeLogs` / `logRecords` lines |
+| Interactive TUI | `--tui` | Scrollable dashboard, live query filter, follow mode, details view, histogram |
+| File follow | `-F` / `follow: true` | Tail new lines in real time |
+| Chronological sort | `-s` / `sort: true` | Merge multiple files by timestamp |
+| Pager integration | auto / `--pager` | Auto-launch `less` when output is a TTY |
+| Shell completions | `--shell-completions` | bash, zsh, fish, powershell, elvish |
+| Theming | `--theme` / `theme:` | Built-in color themes (default, monokai, solarized) |
+| Compressed logs | auto-detect | `.gz` (gzip) — `.zst`, `.bz2`, `.xz` roadmap |
 
 ## Quick start
 
-```sh
+```powershell
 # View a log file
 logcli app.log
 
@@ -51,48 +40,145 @@ logcli -l warn app.log
 # Filter nested fields
 logcli -f request.method=GET app.log
 
-# Regex on a field, excluding entries where the field is absent
-logcli -f 'message~~="timeout|refused"' app.log
+# Boolean query: errors with slow requests
+logcli -q 'level = error and duration > 1.0' app.log
 
-# Boolean queries: errors only, with a status code >= 500
-logcli -q 'level = error and status >= 500' app.log
-
-# Value set membership: status in (200, 201, 204)
+# Value set membership
 logcli -q 'status in (200, 201, 204)' app.log
 
-# Sort/merge files chronologically (in-memory)
-logcli -s api.log worker.log
+# OpenTelemetry OTLP logs
+logcli --input-format otel otel.log
 
-# Raw matched lines, for further shell processing
-logcli -r -f component=tsdb app.log | grep foo
+# Export to Prometheus for scraping
+logcli --output-format prometheus -o metrics.prom app.log
 
-# Read from stdin
-kubectl logs deploy/api | logcli -P -l warn
-```
+# Export to CSV for spreadsheets
+logcli --output-format csv -o report.csv app.log
+
+# Redact PII automatically
+# (see config example below)
+logcli --config logcli.yaml app.log
 
 # Interactive TUI dashboard
+logcli --tui app.log
+
+# Follow a live log file
+logcli -F -l error app.log
+
+# Read from stdin
+kubectl logs deploy/api | logcli -l error
+
+# Auto-pager when output is a TTY
+logcli app.log        # pipes to less automatically
+logcli -P app.log     # disable pager (streaming)
+
+# Shell completions
+logcli --shell-completions bash > /etc/bash_completion.d/logcli
+```
+
+## Declarative config (`logcli.yaml`)
+
+Save flags you reuse into `logcli.yaml` in your project root (or pass `--config path`). CLI flags always override config values. Config files are also discovered at platform-standard locations:
+
+| OS | System-wide | User profile |
+|----|-------------|--------------|
+| macOS/Linux | `/etc/logcli/config.{yaml,json,toml}` | `~/.config/logcli/config.{yaml,json,toml}` |
+| Windows | `%PROGRAMDATA%\logcli\config.{yaml,json,toml}` | `%USERPROFILE%\AppData\Roaming\logcli\config.{yaml,json,toml}` |
+
+Discovery order: current-directory `logcli.{yaml,yml,json}` → user profile → system-wide → `--config`.
+
+```yaml
+# Default input files (used when none passed on CLI)
+files:
+  - "logs/api.log"
+  - "logs/worker.log"
+
+# Default filtering
+level: warn
+since: "-1h"
+until: now
+filters:
+  - "component=api"
+queries:
+  - "status >= 500"
+
+# Output
+output_format: formatted   # formatted | raw | json | csv | prometheus
+output: "report.txt"
+time_zone: "Europe/Berlin"
+hide:
+  - "request.headers.authorization"
+hide_empty: true
+expansion: auto
+sort: true
+pager: auto                # auto | always | never
+theme: default             # default | monokai | solarized
+
+# PII redaction (applied to message/logger/caller/fields)
+redact:
+  - field: "message"
+    pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+    replace: "[EMAIL]"
+  - field: "*"
+    pattern: "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"
+    replace: "[CARD]"
+
+# Alert rules (great for CI / sidecar containers)
+alerts:
+  - name: "high_error_rate"
+    query: "level = error and status >= 500"
+    threshold: 10
+    exit_code: 2
+  - name: "fatal_occurred"
+    query: "level = fatal"
+    threshold: 1
+    exit_code: 2
+
+# TUI defaults
+tui:
+  sort: time       # none | time | level
+  follow: false
+  theme: default
+```
+
+## Interactive TUI dashboard
+
 ```powershell
-# Launch the TUI on a log file
-logcli --tui backend/logs/api.log
-
-# TUI with follow mode (watch for new lines)
-logcli --tui --follow backend/logs/api.log
-
-# TUI with pre-filter
-logcli --tui -q 'level = error' backend/logs/api.log
+logcli --tui app.log
+logcli --tui --follow app.log
+logcli --tui -q 'level = error' app.log
 ```
 
-In the TUI:
-- `j`/`k` — scroll up/down
-- `g`/`G` — go to top/bottom
-- `/` or `f` — open filter prompt
-- `d`/`Enter` — open details view
-- `o` — add a log file (enter path)
-- `s` — cycle sort (none / time / level)
-- `F` — toggle follow mode
-- `?` — show help
-- `q` — quit
-```
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Scroll up/down |
+| `g`/`G` | Go to top/bottom |
+| `/` | Open filter prompt |
+| `Esc` | Clear the active filter |
+| `d`/`Enter` | Focus the details pane (scroll with `j`/`k`) |
+| `o` | Add a log file (enter path) |
+| `s` | Cycle sort (none / time / level) |
+| `f`/`F` | Toggle follow mode |
+| `h` | Toggle histogram view |
+| `?` | Show help |
+| `q` | Quit |
+
+The dashboard mirrors the reference layout: a boxed header with the log source and
+per-level counts, a timestamp/level/message table on the left, a live JSON details
+pane on the right, a filter/status box underneath the table, and a key-hint bar
+with the current match count.
+
+The TUI opens automatically when you run `logcli` with no files and stdin is a TTY.
+
+## Output formats
+
+| Format | Flag | Best for |
+|--------|------|----------|
+| `formatted` (default) | `-o out.txt` | Human reading in terminal |
+| `raw` | `--output-format raw -o out.log` | Exact source passthrough |
+| `json` | `--output-format json -o out.jsonl` | Downstream JSON tools |
+| `csv` | `--output-format csv -o report.csv` | Spreadsheets / Excel |
+| `prometheus` | `--output-format prometheus -o metrics.prom` | Prometheus scrape targets |
 
 ## Installation
 
@@ -103,10 +189,7 @@ cargo build --release
 ./target/release/logcli --help
 ```
 
-### Building without a local Rust toolchain
-
-If Rust is not installed (for example on Windows without Visual Studio Build Tools), build inside the official
-Rust container. The helper scripts keep `target/` and the cargo registry in named Docker volumes so rebuilds are fast:
+### Without a local Rust toolchain (Windows/macOS/Linux)
 
 ```powershell
 # PowerShell
@@ -120,16 +203,7 @@ Rust container. The helper scripts keep `target/` and the cargo registry in name
 ./scripts/docker-cargo.sh test
 ```
 
-Run the CLI inside the container:
-
-```sh
-./scripts/docker-cargo.sh run -- tests/fixtures/simple.jsonl
-```
-
 ### Native Windows executable
-
-If you want a `logcli.exe` that runs directly in Windows Terminal / PowerShell — no Docker at runtime —
-cross-compile it from the Linux container (MinGW is installed in the build image):
 
 ```powershell
 # Build only: writes dist\logcli.exe
@@ -146,38 +220,54 @@ logcli --version
 logcli tests\fixtures\simple.jsonl
 ```
 
-Until then you can run it from the repository with `.\dist\logcli.exe`.
+## Configuration precedence (lowest → highest)
+
+1. System-wide config file (`/etc/logcli/config.*` or `%PROGRAMDATA%\logcli\config.*`)
+2. User profile config file (`~/.config/logcli/config.*` or `%APPDATA%\logcli\config.*`)
+3. Current-directory config file (`logcli.yaml` / `logcli.json`)
+4. Environment variables (`LOGCLI_*`)
+5. Command-line arguments
 
 ## Documentation
 
 | Document | Contents |
-|---|---|
+|----------|----------|
 | [docs/PRD.md](docs/PRD.md) | Requirements, scope, success metrics |
-| [docs/CLI_SPEC.md](docs/CLI_SPEC.md) | Command-line contract |
+| [docs/CLI_SPEC.md](docs/CLI_SPEC.md) | **Normative** CLI contract: flags, exit codes, examples |
+| [docs/PARSING_SPEC.md](docs/PARSING_SPEC.md) | **Normative** parsing rules, formats, timestamps, levels |
+| [docs/QUERY_SPEC.md](docs/QUERY_SPEC.md) | **Normative** query grammar, operators, semantics |
+| [docs/CONFIG.md](docs/CONFIG.md) | Config files, env vars, themes, alerts |
+| [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | Test strategy, fixtures, benchmarks, CI |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture and performance design |
-| [docs/PARSING_SPEC.md](docs/PARSING_SPEC.md) | Format and parsing rules |
-| [docs/QUERY_SPEC.md](docs/QUERY_SPEC.md) | Query language |
-| [docs/CONFIG.md](docs/CONFIG.md) | Configuration and themes |
-| [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | Testing strategy |
+| [docs/adr/](docs/adr/) | Architecture Decision Records 0001–0004 |
 | [PLAN.md](PLAN.md) | Implementation roadmap |
 
 ## Project layout
 
 ```
-src/
-  main.rs      entry point and exit-code mapping
-  cli.rs       clap flag surface
-  app.rs       pipeline wiring, time/size parsing, in-memory sort
-  input.rs     file/stdin sources, gzip, delimiter detection
-  parser.rs    JSON/logfmt/plain detection and normalization
-  filter.rs    level/time/field filters and path resolution
-  output.rs    formatting, colors, hiding, expansion, writers
-  model.rs     Entry, Level, Format
-  error.rs     error types and exit codes
-tests/         integration tests and fixtures
-docs/          design and specifications
-docs/adr/      architecture decision records
-scripts/       Docker-based cargo wrappers
+logcli/
+├── Cargo.toml
+├── README.md  CONTRIBUTING.md  CHANGELOG.md  PLAN.md
+├── docs/
+│   ├── README.md  PRD.md  CLI_SPEC.md  DESIGN.md
+│   ├── PARSING_SPEC.md  QUERY_SPEC.md  CONFIG.md  TEST_PLAN.md
+│   └── adr/0001..0004
+├── src/
+│   ├── main.rs       entry point and exit-code mapping
+│   ├── cli.rs        clap flag surface
+│   ├── app.rs        pipeline wiring, config, time/size parsing, export, pager
+│   ├── config.rs     declarative config, PII redaction, alert rules
+│   ├── error.rs      error types and exit codes
+│   ├── filter.rs     level/time/field filters and path resolution
+│   ├── input.rs      file/stdin sources, gzip, follow tailing
+│   ├── model.rs      Entry, Level, Format, ExportFormat, RedactRules
+│   ├── output.rs     formatting, colors, hiding, expansion, writers, pager
+│   ├── parser.rs     JSON/logfmt/plain/OTLP detection and normalization
+│   ├── query/        lexer, parser, AST evaluator (-q engine)
+│   ├── theme.rs      color theme definitions
+│   └── tui/          interactive TUI dashboard (ratatui + crossterm)
+├── tests/            integration tests and fixtures
+└── scripts/          Docker-based cargo wrappers, Windows cross-compile
 ```
 
 ## Contributing

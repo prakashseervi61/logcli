@@ -1,13 +1,15 @@
 use crate::cli::Args;
+use crate::config::Config;
 use crate::error::Error;
 use crate::input;
 use crate::model::{Entry, Level};
 use crate::query::{parse, parse_filter};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame, Terminal,
 };
 use std::fs::File;
@@ -17,7 +19,6 @@ use std::time::{Duration, Instant};
 
 const HEADER_COLOR: Color = Color::Cyan;
 const HEADER_ACCENT: Color = Color::Magenta;
-const BORDER_COLOR: Color = Color::DarkGray;
 const BORDER_ACTIVE: Color = Color::Cyan;
 const LEVEL_TRACE: Color = Color::DarkGray;
 const LEVEL_DEBUG: Color = Color::Cyan;
@@ -31,7 +32,12 @@ const TEXT_BRIGHT: Color = Color::White;
 const STATUS_OK: Color = Color::Green;
 const STATUS_WARN: Color = Color::Yellow;
 const STATUS_ERROR: Color = Color::Red;
-const HIGHLIGHT: Color = Color::LightCyan;
+const KEY_COLOR: Color = Color::Green;
+const HINT_COLOR: Color = Color::Gray;
+const VALUE_STRING: Color = Color::Cyan;
+const VALUE_NUMBER: Color = Color::Yellow;
+const VALUE_BOOL: Color = Color::Magenta;
+const SELECTED_BG: Color = Color::Indexed(237);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuiMode {
@@ -40,6 +46,7 @@ pub enum TuiMode {
     Details,
     Help,
     FilePicker,
+    Histogram,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +58,7 @@ pub enum SortMode {
 pub struct TuiApp {
     entries: Vec<Entry>,
     filtered: Vec<usize>,
-    list_state: ListState,
+    list_state: TableState,
     mode: TuiMode,
     filter_input: String,
     show_details: bool,
@@ -63,17 +70,28 @@ pub struct TuiApp {
     sort_mode: Option<SortMode>,
     args: Args,
     file_picker_input: String,
+    config: Option<Config>,
 }
 
 impl TuiApp {
-    pub fn new(entries: Vec<Entry>, args: Args) -> Self {
-        let mut list_state = ListState::default();
+    pub fn new(entries: Vec<Entry>, args: Args, config: Option<Config>) -> Self {
+        let mut list_state = TableState::default();
         if !entries.is_empty() {
             list_state.select(Some(0));
         }
 
         let mut filtered: Vec<usize> = (0..entries.len()).collect();
-        Self::sort_filtered(&mut filtered[..], &entries, Some(SortMode::Time));
+        let initial_sort = config
+            .as_ref()
+            .and_then(|c| c.tui.as_ref())
+            .and_then(|t| t.sort.as_deref())
+            .unwrap_or("time");
+        let sort_mode = match initial_sort {
+            "time" => Some(SortMode::Time),
+            "level" => Some(SortMode::Level),
+            _ => None,
+        };
+        Self::sort_filtered(&mut filtered[..], &entries, sort_mode);
 
         let filtered_len = filtered.len();
 
@@ -87,11 +105,16 @@ impl TuiApp {
             details_scroll: 0,
             status_message: format!("{} entries loaded", filtered_len),
             status_color: STATUS_OK,
-            follow_enabled: false,
-            follow_paths: Vec::new(),
-            sort_mode: Some(SortMode::Time),
+            follow_enabled: config
+                .as_ref()
+                .and_then(|c| c.tui.as_ref())
+                .and_then(|t| t.follow)
+                .unwrap_or(false),
+            follow_paths: args.files.clone(),
+            sort_mode,
             args,
             file_picker_input: String::new(),
+            config,
         }
     }
 
@@ -99,8 +122,14 @@ impl TuiApp {
         &mut self,
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> io::Result<()> {
-        // Set up file watcher if follow mode is requested
-        if self.args.follow && !self.args.files.is_empty() {
+        // Set up file watcher if follow mode is requested (CLI flag or config).
+        let config_follow = self
+            .config
+            .as_ref()
+            .and_then(|c| c.tui.as_ref())
+            .and_then(|t| t.follow)
+            .unwrap_or(false);
+        if (self.args.follow || config_follow) && !self.args.files.is_empty() {
             self.follow_enabled = true;
             self.follow_paths = self.args.files.clone();
         }
@@ -145,6 +174,11 @@ impl TuiApp {
                         TuiMode::FilePicker => {
                             if self.handle_file_picker(key.code)? {
                                 return Ok(());
+                            }
+                        }
+                        TuiMode::Histogram => {
+                            if key.code == KeyCode::Char('h') {
+                                self.mode = TuiMode::Browsing;
                             }
                         }
                     }
@@ -260,6 +294,70 @@ impl TuiApp {
         }
     }
 
+    /// Compute histogram data: count entries per time bucket per level.
+    /// Returns (bucket_labels, level_counts) where level_counts maps level -> per-bucket counts.
+    fn histogram_data(&self) -> (Vec<String>, Vec<(Level, Vec<u64>)>) {
+        if self.filtered.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        // Collect timestamps that have values
+        let timestamps: Vec<Option<chrono::DateTime<chrono::Utc>>> = self
+            .filtered
+            .iter()
+            .map(|&idx| self.entries[idx].timestamp)
+            .collect();
+
+        let with_ts: Vec<_> = timestamps.iter().filter_map(|t| *t).collect();
+        if with_ts.is_empty() {
+            return (vec![], vec![]);
+        }
+
+        let min_ts = with_ts.iter().min().unwrap();
+        let max_ts = with_ts.iter().max().unwrap();
+        let num_buckets = 10usize.min(with_ts.len());
+        let range_secs = (max_ts.timestamp() - min_ts.timestamp()).max(1) as f64;
+        let bucket_secs = range_secs / num_buckets as f64;
+
+        // Initialize bucket counts per level
+        let levels = [
+            Level::Trace,
+            Level::Debug,
+            Level::Info,
+            Level::Warn,
+            Level::Error,
+            Level::Fatal,
+            Level::Panic,
+        ];
+        let mut level_counts: Vec<(Level, Vec<u64>)> = levels
+            .iter()
+            .copied()
+            .map(|l| (l, vec![0u64; num_buckets]))
+            .collect();
+
+        for (i, &ts) in timestamps.iter().enumerate() {
+            if let Some(ts) = ts {
+                let entry_level = self.entries[self.filtered[i]].level.unwrap_or(Level::Info);
+                let diff_secs = (ts.timestamp() - min_ts.timestamp()) as f64;
+                let bucket = (diff_secs / bucket_secs).floor() as usize;
+                let bucket = bucket.min(num_buckets - 1);
+                if let Some((_, counts)) = level_counts.iter_mut().find(|(l, _)| *l == entry_level)
+                {
+                    counts[bucket] += 1;
+                }
+            }
+        }
+
+        // Bucket labels
+        let mut labels = Vec::with_capacity(num_buckets);
+        for b in 0..num_buckets {
+            let ts = (*min_ts) + chrono::Duration::seconds((b as f64 * bucket_secs) as i64);
+            labels.push(ts.format("%H:%M").to_string());
+        }
+
+        (labels, level_counts)
+    }
+
     fn handle_browsing(&mut self, code: KeyCode, modifiers: KeyModifiers) -> io::Result<bool> {
         match code {
             KeyCode::Char('q') => return Ok(true),
@@ -272,8 +370,15 @@ impl TuiApp {
                 self.filter_input.clear();
             }
             KeyCode::Char('f') => {
-                self.mode = TuiMode::Filtering;
-                self.filter_input.clear();
+                self.toggle_follow();
+            }
+            KeyCode::Esc => {
+                if !self.filter_input.is_empty() {
+                    self.filter_input.clear();
+                    self.rebuild_filtered();
+                    self.status_message = "filter cleared".to_string();
+                    self.status_color = TEXT_DIM;
+                }
             }
             KeyCode::Char('d') | KeyCode::Enter => self.open_details(),
             KeyCode::Char('F') => {
@@ -289,6 +394,13 @@ impl TuiApp {
             }
             KeyCode::Char('s') => {
                 self.cycle_sort();
+            }
+            KeyCode::Char('h') => {
+                if self.mode == TuiMode::Histogram {
+                    self.mode = TuiMode::Browsing;
+                } else {
+                    self.mode = TuiMode::Histogram;
+                }
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(true);
@@ -522,6 +634,114 @@ impl TuiApp {
             .map_err(|e| e.to_string())
     }
 
+    /// Draw the histogram view: stacked bar chart of entries by level over time.
+    fn draw_histogram(&self, f: &mut Frame, area: ratatui::layout::Rect) {
+        let (labels, level_counts) = self.histogram_data();
+
+        if labels.is_empty() {
+            let empty = ratatui::widgets::Paragraph::new("no entries with timestamps").block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title(ratatui::text::Span::styled(
+                        " histogram ",
+                        ratatui::style::Style::default().fg(HEADER_COLOR),
+                    )),
+            );
+            f.render_widget(empty, area);
+            return;
+        }
+
+        let total_count: u64 = level_counts
+            .iter()
+            .map(|(_, c)| c.iter().sum::<u64>())
+            .sum();
+        let max_total: u64 = labels
+            .iter()
+            .enumerate()
+            .map(|(i, _)| level_counts.iter().map(|(_, c)| c[i]).sum::<u64>())
+            .max()
+            .unwrap_or(1);
+        let chart_height = area.height.saturating_sub(2) as usize;
+
+        // Build rows from bottom to top
+        let mut rows: Vec<String> = Vec::with_capacity(chart_height);
+        for row in (0..chart_height).rev() {
+            let threshold = (max_total as f64 * row as f64 / chart_height as f64) as u64;
+            let mut line = String::with_capacity(labels.len() * 2);
+            for b in 0..labels.len() {
+                let bucket_total: u64 = level_counts.iter().map(|(_, c)| c[b]).sum();
+                if bucket_total >= threshold {
+                    // Find the topmost level present in this bucket at this row
+                    let mut ch = ' ';
+                    for (l, counts) in &level_counts {
+                        if counts[b] >= threshold {
+                            ch = match l {
+                                Level::Error | Level::Fatal | Level::Panic => '█',
+                                Level::Warn => '▓',
+                                Level::Info => '▒',
+                                Level::Debug => '░',
+                                Level::Trace => '▱',
+                            };
+                            break;
+                        }
+                    }
+                    line.push(ch);
+                } else {
+                    line.push(' ');
+                }
+                if b < labels.len() - 1 {
+                    line.push(' ');
+                }
+            }
+            rows.push(line);
+        }
+
+        // Build X-axis labels
+        let mut xaxis = String::with_capacity(labels.len() * 2);
+        for (i, label) in labels.iter().enumerate() {
+            if i > 0 {
+                xaxis.push(' ');
+            }
+            xaxis.push_str(label);
+        }
+
+        // Legend
+        let mut legend = String::new();
+        for (l, _) in &level_counts {
+            let sym = match l {
+                Level::Error | Level::Fatal | Level::Panic => "█",
+                Level::Warn => "▓",
+                Level::Info => "▒",
+                Level::Debug => "░",
+                Level::Trace => "▱",
+            };
+            if !legend.is_empty() {
+                legend.push_str("  ");
+            }
+            legend.push_str(&format!("{} {}", sym, l.label()));
+        }
+
+        let info = format!("total={} buckets={}", total_count, labels.len());
+
+        let text: Vec<ratatui::text::Line> = rows
+            .into_iter()
+            .map(ratatui::text::Line::from)
+            .chain(std::iter::once(ratatui::text::Line::from(xaxis)))
+            .chain(std::iter::once(ratatui::text::Line::from(info)))
+            .chain(std::iter::once(ratatui::text::Line::from(legend)))
+            .collect();
+
+        let hist = ratatui::widgets::Paragraph::new(text).block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(ratatui::text::Span::styled(
+                    " histogram (press h to close) ",
+                    ratatui::style::Style::default().fg(HEADER_COLOR),
+                )),
+        );
+        f.render_widget(hist, area);
+    }
+
     fn selected_entry(&self) -> Option<&Entry> {
         self.list_state
             .selected()
@@ -544,190 +764,562 @@ impl TuiApp {
         self.details_scroll = 0;
     }
 
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let size = f.size();
-        // Give enough vertical space: 6 banner lines + 1 blank + 1 info line = 8 minimum
-        let header_height = if size.height > 12 {
-            9
-        } else {
-            size.height.saturating_sub(4)
-        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(header_height), // header with banner
-                Constraint::Min(0),                // body
-                Constraint::Length(3),             // filter bar
+                Constraint::Length(3), // header
+                Constraint::Min(5),    // entries + details
+                Constraint::Length(3), // filter / status
+                Constraint::Length(1), // key hints
             ])
             .split(size);
 
-        // Header with logcli banner
-        let follow_indicator = if self.follow_enabled {
-            " [FOLLOW ON]"
-        } else {
-            ""
-        };
-        let sort_indicator = match self.sort_mode {
-            Some(SortMode::Time) => " [sort: time]",
-            Some(SortMode::Level) => " [sort: level]",
-            None => " [sort: none]",
-        };
+        self.draw_header(f, chunks[0]);
 
-        // Banner lines - each on its own Line to prevent overlap/corruption
-        let banner_lines: Vec<ratatui::text::Line> = logcli_banner()
-            .iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let color = if i % 2 == 0 {
-                    HEADER_COLOR
-                } else {
-                    HEADER_ACCENT
-                };
-                ratatui::text::Line::from(ratatui::text::Span::styled(
-                    line.to_string(),
-                    Style::default().fg(color),
-                ))
-            })
-            .collect();
-
-        // Info line below banner (no truncation, no wrapping)
-        let info_line = format!(
-            "logcli TUI{}{}  {} entries  {} files",
-            follow_indicator,
-            sort_indicator,
-            self.entries.len(),
-            self.follow_paths.len(),
-        );
-
-        let header_text: Vec<ratatui::text::Line> = std::iter::once(ratatui::text::Line::from(""))
-            .chain(banner_lines)
-            .chain(std::iter::once(ratatui::text::Line::from("")))
-            .chain(std::iter::once(ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(
-                    info_line,
-                    Style::default()
-                        .fg(TEXT_BRIGHT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])))
-            .collect();
-
-        let header = Paragraph::new(header_text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_ACTIVE))
-                .title(ratatui::text::Span::styled(
-                    " logcli ",
-                    Style::default()
-                        .fg(HEADER_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        );
-        f.render_widget(header, chunks[0]);
-
-        // Body: split into list and details
+        let body_width = chunks[1].width;
+        let entries_width = (body_width.saturating_mul(68) / 100).max(20);
+        let details_width = body_width
+            .saturating_sub(entries_width)
+            .saturating_sub(1)
+            .max(10);
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .constraints([
+                Constraint::Length(entries_width),
+                Constraint::Length(1),
+                Constraint::Length(details_width),
+            ])
             .split(chunks[1]);
 
-        // List of entries
-        let items: Vec<ListItem> = self
+        match self.mode {
+            TuiMode::Histogram => self.draw_histogram(f, chunks[1]),
+            _ => {
+                self.draw_entries(f, body_chunks[0]);
+                self.draw_details(f, body_chunks[2]);
+            }
+        }
+
+        // Filter box sits under the entries pane only, like the reference UI.
+        let filter_area = Rect {
+            width: entries_width.min(chunks[2].width),
+            ..chunks[2]
+        };
+        self.draw_filter_bar(f, filter_area);
+        self.draw_keybar(f, chunks[3]);
+
+        match self.mode {
+            TuiMode::Help => self.draw_help_popup(f, chunks[1]),
+            TuiMode::FilePicker => self.draw_file_popup(f, chunks[1]),
+            _ => {}
+        }
+    }
+
+    fn draw_header(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER_ACTIVE));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let right_width = 44u16.min(inner.width.saturating_mul(2) / 3);
+        let sections = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(18u16.min(inner.width)),
+                Constraint::Min(0),
+                Constraint::Length(right_width),
+            ])
+            .split(inner);
+
+        let title = Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "logcli ",
+                Style::default()
+                    .fg(HEADER_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(TEXT_BRIGHT),
+            ),
+        ]));
+        f.render_widget(title, sections[0]);
+
+        let source_line = Paragraph::new(Line::from(vec![
+            Span::styled("[ Source: ", Style::default().fg(HEADER_COLOR)),
+            Span::styled(self.source_label(), Style::default().fg(TEXT_BRIGHT)),
+            Span::styled(" ]", Style::default().fg(HEADER_COLOR)),
+        ]))
+        .alignment(Alignment::Center);
+        f.render_widget(source_line, sections[1]);
+
+        let (errors, warns, infos) = self.header_counts();
+        let counts = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("[ ERRORS: {} ]", errors),
+                Style::default().fg(LEVEL_ERROR),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("[ WARNs: {} ]", warns),
+                Style::default().fg(LEVEL_WARN),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("[ INFO: {} ]", infos),
+                Style::default().fg(LEVEL_INFO),
+            ),
+            Span::raw(" "),
+        ]))
+        .alignment(Alignment::Right);
+        f.render_widget(counts, sections[2]);
+    }
+
+    fn draw_entries(&mut self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER_ACTIVE))
+            .title(Span::styled(
+                format!(" entries [{}] ", self.entries.len()),
+                Style::default().fg(HEADER_COLOR),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.filtered.is_empty() {
+            let message = if self.filter_input.trim().is_empty() {
+                "no entries loaded".to_string()
+            } else {
+                format!("no entries match \"{}\"", self.filter_input)
+            };
+            let empty = Paragraph::new(message)
+                .style(Style::default().fg(TEXT_DIM))
+                .alignment(Alignment::Center);
+            f.render_widget(empty, inner);
+            return;
+        }
+
+        let header = Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "TIMESTAMP",
+                Style::default()
+                    .fg(HEADER_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "LEVEL",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "MESSAGE",
+                Style::default()
+                    .fg(HEADER_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ]);
+
+        let selected = self.list_state.selected();
+        let rows: Vec<Row> = self
             .filtered
             .iter()
-            .map(|&idx| {
-                let entry = &self.entries[idx];
-                let level_color = level_color(entry.level.unwrap_or(Level::Info));
-                let level_str = entry
-                    .level
-                    .map(|l| l.label().to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                let time_str = entry
+            .enumerate()
+            .map(|(position, &index)| {
+                let entry = &self.entries[index];
+                let marker = if selected == Some(position) {
+                    Span::styled(
+                        ">",
+                        Style::default().fg(KEY_COLOR).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw(" ")
+                };
+                let time = entry
                     .timestamp
-                    .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                let source = Path::new(&entry.source)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&entry.source);
-                let message = entry.message.as_deref().unwrap_or("");
-                let content = format!(
-                    "{}  {:<5}  {:<20}  {}",
-                    time_str, level_str, source, message
-                );
-                ListItem::new(content).style(Style::default().fg(level_color).bg(Color::Reset))
+                    .map(|t| t.format("%H:%M:%S%.3f").to_string())
+                    .unwrap_or_else(|| "--:--:--.---".to_string());
+                let level = entry.level;
+                let level_text = level.map(level_short).unwrap_or("-").to_string();
+                let level_style = Style::default()
+                    .fg(level_color(level.unwrap_or(Level::Trace)))
+                    .add_modifier(Modifier::BOLD);
+                let message = entry.message.as_deref().unwrap_or("").to_string();
+
+                Row::new(vec![
+                    Cell::from(marker),
+                    Cell::from(Span::styled(time, Style::default().fg(TEXT_DIM))),
+                    Cell::from(Span::styled(level_text, level_style)),
+                    Cell::from(Span::styled(message, Style::default().fg(Color::Gray))),
+                ])
             })
             .collect();
 
-        let list = List::new(items)
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(12),
+                Constraint::Length(5),
+                Constraint::Min(10),
+            ],
+        )
+        .header(header)
+        .column_spacing(1)
+        .highlight_style(Style::default().bg(SELECTED_BG));
+
+        f.render_stateful_widget(table, inner, &mut self.list_state);
+    }
+
+    fn draw_details(&self, f: &mut Frame, area: Rect) {
+        let active = self.show_details || self.mode == TuiMode::Details;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER_ACTIVE))
+            .title(Span::styled(" details ", Style::default().fg(HEADER_COLOR)));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.selected_entry().is_none() {
+            let empty = Paragraph::new("no entry selected").style(Style::default().fg(TEXT_DIM));
+            f.render_widget(empty, inner);
+            return;
+        }
+
+        let lines = self.details_lines();
+        let start = if active {
+            self.details_scroll as usize
+        } else {
+            0
+        };
+        let visible: Vec<Line> = lines.into_iter().skip(start).collect();
+        let details = Paragraph::new(visible).wrap(Wrap { trim: false });
+        f.render_widget(details, inner);
+    }
+
+    fn draw_filter_bar(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(BORDER_ACTIVE))
+            .title(Span::styled(
+                " filter / status ",
+                Style::default().fg(HEADER_COLOR),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let filtering = self.mode == TuiMode::Filtering;
+        let mut spans = vec![
+            Span::styled("Filter: ", Style::default().fg(HINT_COLOR)),
+            Span::styled("[ ", Style::default().fg(BORDER_ACTIVE)),
+            Span::styled(self.filter_input.clone(), Style::default().fg(TEXT_BRIGHT)),
+            Span::styled("]", Style::default().fg(BORDER_ACTIVE)),
+        ];
+        if !filtering && !self.status_message.is_empty() {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(
+                self.status_message.clone(),
+                Style::default().fg(self.status_color),
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), inner);
+
+        if filtering {
+            let x = inner.x + 10 + self.filter_input.chars().count() as u16;
+            f.set_cursor(x.min(inner.x + inner.width.saturating_sub(1)), inner.y);
+        }
+    }
+
+    fn draw_keybar(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let matches_width = 17u16.min(area.width);
+        let parts = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(matches_width)])
+            .split(area);
+
+        f.render_widget(Paragraph::new(self.keybar_line(area.width < 120)), parts[0]);
+
+        let matches = Paragraph::new(Line::from(vec![
+            Span::styled("Matches: ", Style::default().fg(KEY_COLOR)),
+            Span::styled(
+                format!("{}/{}", self.filtered.len(), self.entries.len()),
+                Style::default().fg(TEXT_BRIGHT),
+            ),
+        ]))
+        .alignment(Alignment::Right);
+        f.render_widget(matches, parts[1]);
+    }
+
+    fn keybar_line(&self, compact: bool) -> Line<'static> {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if compact {
+            push_key(&mut spans, "↑/↓", "Nav");
+            push_key(&mut spans, "d", "Details");
+            push_key(&mut spans, "/", "Filter");
+        } else {
+            push_key(&mut spans, "↑/↓", "Navigate");
+            push_key(&mut spans, "Enter/d", "Details");
+            push_key(&mut spans, "/", "Search");
+            push_key(&mut spans, "Esc", "Clear");
+        }
+
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "[f]",
+            Style::default().fg(KEY_COLOR).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("Follow ", Style::default().fg(HINT_COLOR)));
+        if self.follow_enabled {
+            spans.push(Span::styled("(ON)", Style::default().fg(KEY_COLOR)));
+        } else {
+            spans.push(Span::styled("(OFF)", Style::default().fg(TEXT_DIM)));
+        }
+
+        push_key(&mut spans, "?", "Help");
+        push_key(&mut spans, "q", "Quit");
+        Line::from(spans)
+    }
+
+    fn draw_help_popup(&self, f: &mut Frame, area: Rect) {
+        let popup = centered_rect(64, 82, area);
+        f.render_widget(Clear, popup);
+        let help = Paragraph::new(help_text())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(BORDER_COLOR))
-                    .title(ratatui::text::Span::styled(
-                        " entries ",
-                        Style::default().fg(HEADER_COLOR),
-                    )),
+                    .border_style(Style::default().fg(BORDER_ACTIVE))
+                    .title(Span::styled(" help ", Style::default().fg(HEADER_COLOR))),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(HIGHLIGHT)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">> ");
+            .wrap(Wrap { trim: false });
+        f.render_widget(help, popup);
+    }
 
-        f.render_stateful_widget(list, body_chunks[0], &mut self.list_state.clone());
-
-        // Details panel
-        if self.show_details {
-            if let Some(entry) = self.selected_entry() {
-                let details = format_entry_details(entry);
-                let lines: Vec<&str> = details.lines().collect();
-                let start = self.details_scroll as usize;
-                let visible: Vec<&str> = lines.into_iter().skip(start).collect();
-                let details_text = visible.join("\n");
-                let details_paragraph = Paragraph::new(details_text).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(BORDER_COLOR))
-                        .title(ratatui::text::Span::styled(
-                            " details ",
-                            Style::default().fg(HEADER_COLOR),
-                        )),
-                );
-                f.render_widget(details_paragraph, body_chunks[1]);
-            }
-        } else {
-            let empty = Paragraph::new("press 'd' or Enter to view details").block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(BORDER_COLOR)),
-            );
-            f.render_widget(empty, body_chunks[1]);
-        }
-
-        // Filter / status bar
-        let (bar_text, bar_color) = match self.mode {
-            TuiMode::Filtering => (format!("/{}", self.filter_input), TEXT_BRIGHT),
-            TuiMode::Help => (help_text(), TEXT_BRIGHT),
-            TuiMode::FilePicker => (format!("add file: {}", self.file_picker_input), TEXT_BRIGHT),
-            _ => (self.status_message.clone(), self.status_color),
-        };
-        let bar = Paragraph::new(ratatui::text::Span::styled(
-            bar_text,
-            Style::default().fg(bar_color),
-        ))
+    fn draw_file_popup(&self, f: &mut Frame, area: Rect) {
+        let mut popup = centered_rect(60, 20, area);
+        popup.height = popup.height.max(3).min(area.height);
+        f.render_widget(Clear, popup);
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled("add file: ", Style::default().fg(HINT_COLOR)),
+            Span::styled(
+                self.file_picker_input.clone(),
+                Style::default().fg(TEXT_BRIGHT),
+            ),
+        ]))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(BORDER_ACTIVE))
-                .title(ratatui::text::Span::styled(
-                    " filter / status ",
+                .title(Span::styled(
+                    " add file ",
                     Style::default().fg(HEADER_COLOR),
                 )),
         );
-        f.render_widget(bar, chunks[2]);
+        f.render_widget(input, popup);
+    }
+
+    fn source_label(&self) -> String {
+        let files = if self.follow_paths.is_empty() {
+            &self.args.files
+        } else {
+            &self.follow_paths
+        };
+        if files.is_empty() {
+            return "stdin".to_string();
+        }
+        let first = files[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| files[0].to_str().unwrap_or("?"));
+        if files.len() == 1 {
+            first.to_string()
+        } else {
+            format!("{} +{}", first, files.len() - 1)
+        }
+    }
+
+    fn header_counts(&self) -> (usize, usize, usize) {
+        let mut errors = 0;
+        let mut warns = 0;
+        let mut infos = 0;
+        for entry in &self.entries {
+            match entry.level {
+                Some(Level::Error | Level::Fatal | Level::Panic) => errors += 1,
+                Some(Level::Warn) => warns += 1,
+                Some(Level::Info) => infos += 1,
+                _ => {}
+            }
+        }
+        (errors, warns, infos)
+    }
+
+    fn details_lines(&self) -> Vec<Line<'static>> {
+        let Some(entry) = self.selected_entry() else {
+            return vec![Line::from("no entry selected")];
+        };
+        let value = entry_details_json(entry);
+        let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| entry.raw.clone());
+        let level = entry.level.map(level_color);
+        pretty
+            .lines()
+            .map(|line| colorize_json_line(line, level))
+            .collect()
+    }
+}
+
+/// Short three/four-character level label used by the entries table.
+fn level_short(level: Level) -> &'static str {
+    match level {
+        Level::Trace => "TRC",
+        Level::Debug => "DBG",
+        Level::Info => "INF",
+        Level::Warn => "WRN",
+        Level::Error => "ERR",
+        Level::Fatal => "FTL",
+        Level::Panic => "PNC",
+    }
+}
+
+/// Append a `[key] description` pair to a key-hint line.
+fn push_key(spans: &mut Vec<Span<'static>>, key: &str, description: &str) {
+    if !spans.is_empty() {
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(
+        format!("[{}]", key),
+        Style::default().fg(KEY_COLOR).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        description.to_string(),
+        Style::default().fg(HINT_COLOR),
+    ));
+}
+
+/// Center a rectangle within `area` using percentages of width and height.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+/// Flatten an entry into an ordered JSON object for the details pane.
+fn entry_details_json(entry: &Entry) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "timestamp".to_string(),
+        entry
+            .timestamp
+            .map(|ts| serde_json::Value::String(ts.to_rfc3339()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "level".to_string(),
+        entry
+            .level
+            .map(|level| serde_json::Value::String(level.label().to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    map.insert(
+        "source".to_string(),
+        serde_json::Value::String(entry.source.clone()),
+    );
+    map.insert("line".to_string(), serde_json::Value::from(entry.line));
+    if let Some(message) = &entry.message {
+        map.insert(
+            "message".to_string(),
+            serde_json::Value::String(message.clone()),
+        );
+    }
+    if let Some(logger) = &entry.logger {
+        map.insert(
+            "logger".to_string(),
+            serde_json::Value::String(logger.clone()),
+        );
+    }
+    if let Some(caller) = &entry.caller {
+        map.insert(
+            "caller".to_string(),
+            serde_json::Value::String(caller.clone()),
+        );
+    }
+    for (key, value) in &entry.fields {
+        map.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Colorize one line of pretty-printed JSON for the details pane.
+fn colorize_json_line(line: &str, level_color: Option<Color>) -> Line<'static> {
+    let trimmed = line.trim_start();
+    let indent_length = line.len() - trimmed.len();
+    let indent = &line[..indent_length];
+
+    if trimmed == "{" || trimmed == "}" || trimmed == "}," {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(TEXT_DIM),
+        ));
+    }
+
+    if let Some((key, value)) = trimmed.split_once(": ") {
+        let is_level = key.trim() == "\"level\"";
+        let value_style = if is_level {
+            level_color.unwrap_or(VALUE_STRING)
+        } else {
+            json_value_color(value)
+        };
+        return Line::from(vec![
+            Span::raw(indent.to_string()),
+            Span::styled(
+                key.to_string(),
+                Style::default()
+                    .fg(TEXT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": "),
+            Span::styled(value.to_string(), Style::default().fg(value_style)),
+        ]);
+    }
+
+    Line::from(Span::styled(
+        line.to_string(),
+        Style::default().fg(TEXT_DIM),
+    ))
+}
+
+fn json_value_color(value: &str) -> Color {
+    let value = value.trim_end_matches(',');
+    if value.starts_with('"') {
+        VALUE_STRING
+    } else if value == "true" || value == "false" {
+        VALUE_BOOL
+    } else if value == "null" || value.starts_with('{') || value.starts_with('[') {
+        TEXT_DIM
+    } else if value.parse::<f64>().is_ok() {
+        VALUE_NUMBER
+    } else {
+        TEXT_BRIGHT
     }
 }
 
@@ -743,61 +1335,6 @@ fn level_color(level: Level) -> Color {
     }
 }
 
-/// ASCII art logo for the TUI header.
-/// Raw string literal preserves all backslashes and spaces exactly.
-fn logcli_banner() -> Vec<&'static str> {
-    vec![
-        r#"  ____        _     _"#,
-        r#" / ___| _ __ (_) __| | ___"#,
-        r#"| |  _ | '_ \| |/ _` |/ _ \"#,
-        r#"| |_| || |_) | | (_| |  __/"#,
-        r#" \____|| .__/|_|\__,_|\___|"#,
-        r#"     |_|                  "#,
-    ]
-}
-
-fn format_entry_details(entry: &Entry) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!("source: {}", entry.source));
-    lines.push(format!("line: {}", entry.line));
-    lines.push(format!("format: {:?}", entry.format));
-
-    if let Some(ts) = entry.timestamp {
-        lines.push(format!("timestamp: {}", ts));
-    }
-    if let Some(level) = entry.level {
-        lines.push(format!("level: {:?} ({})", level, level.label()));
-    }
-    if let Some(level_raw) = &entry.level_raw {
-        lines.push(format!("level_raw: {}", level_raw));
-    }
-    if let Some(message) = &entry.message {
-        lines.push(format!("message: {}", message));
-    }
-    if let Some(logger) = &entry.logger {
-        lines.push(format!("logger: {}", logger));
-    }
-    if let Some(caller) = &entry.caller {
-        lines.push(format!("caller: {}", caller));
-    }
-
-    lines.push(String::new());
-    lines.push("fields:".to_string());
-    if entry.fields.is_empty() {
-        lines.push("  (none)".to_string());
-    } else {
-        for (key, value) in &entry.fields {
-            lines.push(format!("  {}: {}", key, value));
-        }
-    }
-
-    lines.push(String::new());
-    lines.push("raw:".to_string());
-    lines.push(entry.raw.clone());
-
-    lines.join("\n")
-}
-
 fn help_text() -> String {
     let lines = vec![
         "logcli TUI — Key Bindings".to_string(),
@@ -805,11 +1342,13 @@ fn help_text() -> String {
         "  q        Quit".to_string(),
         "  j/k      Scroll up/down".to_string(),
         "  g/G      Go to top/bottom".to_string(),
-        "  / or f   Open filter prompt".to_string(),
-        "  d/Enter  Open details view".to_string(),
+        "  /        Open filter prompt".to_string(),
+        "  Esc      Clear the active filter".to_string(),
+        "  d/Enter  Focus the details pane".to_string(),
         "  o        Add a log file".to_string(),
         "  s        Cycle sort (none/time/level)".to_string(),
-        "  F        Toggle follow mode".to_string(),
+        "  f/F      Toggle follow mode".to_string(),
+        "  h        Toggle histogram view".to_string(),
         "  ?        Show this help".to_string(),
         "  Ctrl-C   Force quit".to_string(),
         String::new(),
@@ -849,6 +1388,7 @@ mod tests {
             consumed: Vec::new(),
             raw: format!("{} {}", level, message),
             format: Format::Json,
+            redacted: false,
         }
     }
 
@@ -875,7 +1415,7 @@ mod tests {
     #[test]
     fn new_app_selects_first_entry() {
         let entries = make_entries();
-        let app = TuiApp::new(entries.clone(), make_args());
+        let app = TuiApp::new(entries.clone(), make_args(), None);
         assert_eq!(app.list_state.selected(), Some(0));
         assert_eq!(app.filtered.len(), 3);
         assert_eq!(app.mode, TuiMode::Browsing);
@@ -883,7 +1423,7 @@ mod tests {
 
     #[test]
     fn new_app_with_no_entries_has_no_selection() {
-        let app = TuiApp::new(vec![], make_args());
+        let app = TuiApp::new(vec![], make_args(), None);
         assert_eq!(app.list_state.selected(), None);
         assert_eq!(app.filtered.len(), 0);
     }
@@ -891,7 +1431,7 @@ mod tests {
     #[test]
     fn scroll_down_moves_selection() {
         let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
+        let mut app = TuiApp::new(entries, make_args(), None);
         app.scroll_down();
         assert_eq!(app.list_state.selected(), Some(1));
         app.scroll_down();
@@ -903,7 +1443,7 @@ mod tests {
     #[test]
     fn scroll_up_moves_selection() {
         let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
+        let mut app = TuiApp::new(entries, make_args(), None);
         app.scroll_to_bottom();
         assert_eq!(app.list_state.selected(), Some(2));
         app.scroll_up();
@@ -917,7 +1457,7 @@ mod tests {
     #[test]
     fn apply_filter_matches_entries() {
         let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
+        let mut app = TuiApp::new(entries, make_args(), None);
         app.filter_input = "level = error".to_string();
         app.rebuild_filtered();
         assert_eq!(app.mode, TuiMode::Browsing);
@@ -928,7 +1468,7 @@ mod tests {
     #[test]
     fn apply_filter_no_matches() {
         let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
+        let mut app = TuiApp::new(entries, make_args(), None);
         app.filter_input = "level = panic".to_string();
         app.rebuild_filtered();
         assert_eq!(app.filtered.len(), 0);
@@ -938,7 +1478,7 @@ mod tests {
     #[test]
     fn cycle_sort_changes_mode() {
         let entries = make_entries();
-        let mut app = TuiApp::new(entries, make_args());
+        let mut app = TuiApp::new(entries, make_args(), None);
         assert_eq!(app.sort_mode, Some(SortMode::Time));
         app.cycle_sort();
         assert_eq!(app.sort_mode, Some(SortMode::Level));
@@ -952,7 +1492,7 @@ mod tests {
     fn toggle_follow_no_files() {
         let entries = make_entries();
         let args = make_args();
-        let mut app = TuiApp::new(entries, args);
+        let mut app = TuiApp::new(entries, args, None);
         assert!(!app.follow_enabled);
         app.toggle_follow();
         assert!(!app.follow_enabled); // no files, so stays off
@@ -976,6 +1516,75 @@ mod tests {
         assert_eq!(level_color(Level::Debug), Color::Cyan);
         assert_eq!(level_color(Level::Fatal), Color::LightRed);
         assert_eq!(level_color(Level::Panic), Color::LightRed);
+    }
+
+    #[test]
+    fn level_short_labels() {
+        assert_eq!(level_short(Level::Error), "ERR");
+        assert_eq!(level_short(Level::Warn), "WRN");
+        assert_eq!(level_short(Level::Info), "INF");
+        assert_eq!(level_short(Level::Debug), "DBG");
+        assert_eq!(level_short(Level::Trace), "TRC");
+    }
+
+    #[test]
+    fn header_counts_only_levels_shown_in_header() {
+        let mut entries = make_entries();
+        entries[0].level = Some(Level::Fatal);
+        entries[1].level = Some(Level::Warn);
+        entries[2].level = Some(Level::Debug);
+        let app = TuiApp::new(entries, make_args(), None);
+        assert_eq!(app.header_counts(), (1, 1, 0));
+    }
+
+    #[test]
+    fn details_json_flattens_fields() {
+        let entry = &make_entries()[0];
+        let value = entry_details_json(entry);
+        assert_eq!(value["message"], "connection refused");
+        assert_eq!(value["status"], 500);
+        assert!(value["timestamp"].is_string());
+    }
+
+    #[test]
+    fn draw_renders_reference_layout() {
+        let entries = make_entries();
+        let mut app = TuiApp::new(entries, make_args(), None);
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        let mut screen = String::new();
+        for row in buffer.content.chunks(width) {
+            for cell in row {
+                screen.push_str(cell.symbol());
+            }
+            screen.push('\n');
+        }
+        for expected in [
+            "logcli v",
+            "Source:",
+            "ERRORS:",
+            "WARNs:",
+            "INFO:",
+            "entries [3]",
+            "TIMESTAMP",
+            "LEVEL",
+            "MESSAGE",
+            "details",
+            "filter / status",
+            "Filter:",
+            "Matches:",
+            "[q]",
+            "Quit",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "missing {expected:?} in rendered screen:\n{screen}"
+            );
+        }
     }
 
     #[test]

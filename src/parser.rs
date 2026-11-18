@@ -38,6 +38,10 @@ pub fn parse_entry(
         "auto" => {
             let looks_like_json = raw.trim_start().starts_with('{');
             if let Some(parsed) = parse_json(raw, allow_prefix) {
+                // Detect OpenTelemetry OTLP structure.
+                if parsed.contains_key("resourceLogs") {
+                    return parse_otel(raw, source, line);
+                }
                 fields = parsed;
                 format = Format::Json;
             } else if looks_like_json {
@@ -53,6 +57,9 @@ pub fn parse_entry(
             fields = parse_json(raw, allow_prefix)?;
             format = Format::Json;
         }
+        "otel" => {
+            return parse_otel(raw, source, line);
+        }
         "logfmt" => match parse_logfmt(raw) {
             Some(parsed) => {
                 fields = parsed;
@@ -65,6 +72,150 @@ pub fn parse_entry(
     }
 
     Some(normalize(fields, plain_message, raw, source, line, format))
+}
+
+/// Parse an OpenTelemetry OTLP JSON log line into an Entry.
+///
+/// Expected structure:
+/// ```json
+/// {
+///   "resourceLogs": [{
+///     "resource": { "attributes": [...] },
+///     "scopeLogs": [{
+///       "logRecords": [{
+///         "timeUnixNano": "...",
+///         "severityNumber": 9,
+///         "severityText": "ERROR",
+///         "body": { "stringValue": "..." },
+///         "attributes": [...]
+///       }]
+///     }]
+///   }]
+/// }
+/// ```
+#[allow(clippy::never_loop)]
+fn parse_otel(raw: &str, source: &str, line: u64) -> Option<Entry> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let resource_logs = value.get("resourceLogs")?.as_array()?;
+
+    // Take the first log record found (OTLP batches multiple; we emit one per line).
+    for rl in resource_logs {
+        // Extract resource attributes for context.
+        let mut resource_attrs = Map::new();
+        if let Some(resource) = rl.get("resource").and_then(|r| r.get("attributes")) {
+            if let Some(attrs) = resource.as_array() {
+                for attr in attrs {
+                    if let (Some(key), Some(val)) =
+                        (attr.get("key").and_then(|k| k.as_str()), attr.get("value"))
+                    {
+                        if let Some(sv) = val.get("stringValue").and_then(|v| v.as_str()) {
+                            resource_attrs.insert(key.to_string(), Value::String(sv.to_string()));
+                        } else if let Some(iv) = val.get("intValue").and_then(|v| v.as_i64()) {
+                            resource_attrs.insert(key.to_string(), Value::Number(iv.into()));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(scope_logs) = rl.get("scopeLogs").and_then(|s| s.as_array()) {
+            for sl in scope_logs {
+                if let Some(records) = sl.get("logRecords").and_then(|r| r.as_array()) {
+                    for rec in records {
+                        let mut fields = resource_attrs.clone();
+
+                        // Add scope attributes.
+                        if let Some(scope) = sl.get("scope").and_then(|s| s.get("attributes")) {
+                            if let Some(attrs) = scope.as_array() {
+                                for attr in attrs {
+                                    if let (Some(key), Some(val)) = (
+                                        attr.get("key").and_then(|k| k.as_str()),
+                                        attr.get("value"),
+                                    ) {
+                                        if let Some(sv) =
+                                            val.get("stringValue").and_then(|v| v.as_str())
+                                        {
+                                            fields.insert(
+                                                key.to_string(),
+                                                Value::String(sv.to_string()),
+                                            );
+                                        } else if let Some(iv) =
+                                            val.get("intValue").and_then(|v| v.as_i64())
+                                        {
+                                            fields
+                                                .insert(key.to_string(), Value::Number(iv.into()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add record attributes.
+                        if let Some(attrs) = rec.get("attributes").and_then(|r| r.as_array()) {
+                            for attr in attrs {
+                                if let (Some(key), Some(val)) =
+                                    (attr.get("key").and_then(|k| k.as_str()), attr.get("value"))
+                                {
+                                    if let Some(sv) =
+                                        val.get("stringValue").and_then(|v| v.as_str())
+                                    {
+                                        fields
+                                            .insert(key.to_string(), Value::String(sv.to_string()));
+                                    } else if let Some(iv) =
+                                        val.get("intValue").and_then(|v| v.as_i64())
+                                    {
+                                        fields.insert(key.to_string(), Value::Number(iv.into()));
+                                    } else if let Some(bv) =
+                                        val.get("boolValue").and_then(|v| v.as_bool())
+                                    {
+                                        fields.insert(key.to_string(), Value::Bool(bv));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Timestamp from timeUnixNano.
+                        if let Some(nano_str) = rec.get("timeUnixNano").and_then(|v| v.as_str()) {
+                            if let Ok(nanos) = nano_str.parse::<i64>() {
+                                let secs = nanos / 1_000_000_000;
+                                let nsecs = (nanos % 1_000_000_000) as u32;
+                                if let Some(ts) = Utc.timestamp_opt(secs, nsecs).single() {
+                                    fields.insert(
+                                        "timestamp".to_string(),
+                                        Value::String(ts.to_rfc3339()),
+                                    );
+                                }
+                            }
+                        }
+
+                        // Severity.
+                        if let Some(sev_text) = rec.get("severityText").and_then(|v| v.as_str()) {
+                            fields.insert("level".to_string(), Value::String(sev_text.to_string()));
+                        }
+                        if let Some(sev_num) = rec.get("severityNumber").and_then(|v| v.as_i64()) {
+                            fields.insert(
+                                "severity_number".to_string(),
+                                Value::Number(sev_num.into()),
+                            );
+                        }
+
+                        // Body message.
+                        if let Some(body) = rec.get("body") {
+                            if let Some(s) = body.get("stringValue").and_then(|v| v.as_str()) {
+                                fields.insert("message".to_string(), Value::String(s.to_string()));
+                            } else {
+                                fields.insert("body".to_string(), body.clone());
+                            }
+                        }
+
+                        return Some(normalize(fields, None, raw, source, line, Format::Otel));
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn normalize(
@@ -88,6 +239,7 @@ fn normalize(
         consumed: Vec::new(),
         raw: raw.to_string(),
         format,
+        redacted: false,
     };
 
     for key in TIMESTAMP_KEYS {

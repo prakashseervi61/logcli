@@ -14,6 +14,10 @@ pub struct Args {
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
+    /// Config file path (logcli.yaml/json/toml). Auto-discovered if omitted.
+    #[arg(long = "config", value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     /// Print help
     #[arg(long, action = clap::ArgAction::Help)]
     pub help: Option<bool>,
@@ -111,6 +115,14 @@ pub struct Args {
     /// Write output to a file instead of stdout
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    /// Output format: formatted, raw, json, csv, prometheus
+    #[arg(
+        long = "output-format",
+        value_name = "FORMAT",
+        default_value = "formatted"
+    )]
+    pub output_format: String,
 
     /// Output entry delimiter: newline, nul
     #[arg(

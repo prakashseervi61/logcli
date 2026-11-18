@@ -1,6 +1,6 @@
 # Log Analysis CLI — Implementation Roadmap
 
-A fast, local-first log viewer/processor for JSON and logfmt logs, inspired by [hl](https://github.com/pamburus/hl).
+A fast, local-first log viewer/processor for JSON, logfmt, plain text, and OpenTelemetry OTLP logs, inspired by [hl](https://github.com/pamburus/hl) and [lnav](https://github.com/tstack/lnav).
 
 ## Documentation Map
 
@@ -13,7 +13,7 @@ All project documents live in [`docs/`](docs/README.md):
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, pipeline, indexing, concurrency, performance budgets |
 | [docs/PARSING_SPEC.md](docs/PARSING_SPEC.md) | **Normative** parsing rules, formats, timestamps, levels |
 | [docs/QUERY_SPEC.md](docs/QUERY_SPEC.md) | **Normative** query grammar, operators, semantics |
-| [docs/CONFIG.md](docs/CONFIG.md) | Config files, env vars, themes |
+| [docs/CONFIG.md](docs/CONFIG.md) | Config files, env vars, themes, PII redaction, alert rules |
 | [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | Test strategy, fixtures, benchmarks, CI, release checklist |
 | [docs/adr/](docs/adr/) | Architecture Decision Records 0001–0004 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, style, commit/PR process |
@@ -21,30 +21,49 @@ All project documents live in [`docs/`](docs/README.md):
 
 **Rule:** CLI_SPEC, PARSING_SPEC, and QUERY_SPEC are normative. Behavior changes require a spec update in the same PR.
 
+---
+
 ## Status (v0.2.0)
 
-Implemented and tested:
+### Implemented and tested
 
 - JSON/JSONL, logfmt, and plain-text parsing with auto-detection and `--allow-prefix`
+- OpenTelemetry OTLP JSON parsing (`--input-format otel`): `resourceLogs` → `scopeLogs` → `logRecords`
 - gzip input, LF/CRLF/CR/NUL delimiters, multiple files and stdin
 - level/time/field filtering, nested and array paths, relative and absolute time ranges
+- boolean `-q` query language (full QUERY_SPEC: `and`/`or`/`not`, parentheses, comparisons, `in (...)`, `like`/`not like`, `exists(...)`, absent-field `?`, value sets `@file`/`@-`)
 - formatted and raw output, colors, hiding, expansion, time zones, file output
-- in-memory `-s` sorting
-- exit codes and error model
-- boolean `-q` query language (full QUERY_SPEC: `and`/`or`/`not`, parentheses, comparisons,
-  `in (...)`, `like`/`not like`, `exists(...)`, absent-field `?`, value sets `@file`/`@-`)
-- interactive TUI dashboard (`--tui`): scrollable list, color-coded levels, live query filtering,
-  details view, follow mode toggle, help screen
+- multi-format export: `json` (JSON Lines), `csv` (flattened), `prometheus` (text exposition)
+- PII redaction via declarative `redact:` rules in config (message/logger/caller/fields, `*` wildcard)
+- Alert rules via declarative `alerts:` in config (threshold breach → exit code)
+- Config file auto-discovery (`logcli.yaml/json`), `--config` flag, CLI overrides config
+- Interactive TUI dashboard (`--tui`): scrollable list, color-coded levels, live query filtering, details view, follow mode toggle, histogram view, help screen
+- File follow mode (`-F`) tails new lines in real time
+- Chronological sort (`-s`) merges multiple files by timestamp
+- 52 unit tests + 15 CLI integration tests + 27 query integration tests pass
+- `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test` all green
 
-Not implemented (rejected with a clear error or accepted as no-ops): `-F`, pager, themes,
-zstd/bzip2/xz, index-backed external sorting, config files, completions.
+### Not implemented (rejected with a clear error or accepted as no-ops)
 
-52 unit tests + 15 CLI integration tests + 27 query integration tests pass. Build/test via Docker is documented in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+- zstd/bzip2/xz compression (only gzip supported)
+- On-disk index for sorting (in-memory sort only)
+- Shell completions (`--shell-completions` flag accepted but not implemented)
+- Pager integration (`--paging` flag accepted but not implemented)
+- Theme engine (`--theme` flag accepted but not implemented)
+- OTLP receiver (localhost:4317 HTTP endpoint)
+- AI-assisted natural-language queries
+
+Native Windows `logcli.exe` built and installed at `C:\Users\praka\bin\logcli.exe` (PATH set).
+
+All code committed and pushed to GitHub: `https://github.com/prakashseervi61/logcli.git`
+
+---
 
 ## Goal
 
-Build a single binary that reads multi-GB logs quickly, filters them precisely (level, nested fields, boolean queries, time ranges), and renders them clearly — while remaining fully pipeable.
+Build a single binary that reads multi-GB logs quickly, filters them precisely (level, nested fields, boolean queries, time ranges), redacts PII automatically, alerts on thresholds, exports to multiple formats, parses OpenTelemetry OTLP, and renders them clearly — while remaining fully pipeable.
+
+---
 
 ## Reference: hl
 
@@ -56,7 +75,9 @@ hl is the design benchmark:
 - Compression support, pager integration, themes
 - ~2 GiB/s on a 2.3 GiB / 6M-line file
 
-Our target: **match its UX and approach 80% of its throughput in v1**, with a clearer specification and a smaller feature surface.
+Our target: **match its UX and approach 80% of its throughput in v1**, with a clearer specification, PII redaction, alert rules, and OTLP support.
+
+---
 
 ## Tech Stack
 
@@ -64,54 +85,70 @@ Our target: **match its UX and approach 80% of its throughput in v1**, with a cl
 |---|---|---|
 | Language | **Rust** (stable, MSRV pinned) | Performance, safety, single binary — [ADR 0001](docs/adr/0001-use-rust.md) |
 | CLI | `clap` (derive) | Ergonomics, help, completions |
-| JSON | `serde_json` (evaluate a borrowed parser later) | Correctness first; benchmark before optimizing |
-| Time | `chrono` (evaluate `jiff`) | Timezone correctness |
-| Regex | `regex` | Compile-once filters |
-| Compression | `flate2`, `zstd`, `bzip2`, `xz2` | Feature-gated |
-| Colors | `nu-ansi-term` or custom writer | Role-based themes — [ADR 0004](docs/adr/0004-theme-system.md) |
-| Parallelism | `rayon` (index build only) | Ordered output preserved |
-| Config | `serde` + `toml`/`serde_yaml`/`serde_json` | One schema, three formats |
-| Errors | `thiserror` | Typed errors mapped to exit codes |
-| Testing | `assert_cmd`, `predicates`, `insta`, `proptest`, `criterion` | See [TEST_PLAN](docs/TEST_PLAN.md) |
+| JSON | `serde_json` | Correctness first |
+| Time | `chrono` / `chrono-tz` | Timezone correctness |
+| Regex | `regex` | Compile-once filters, PII redaction patterns |
+| Compression | `flate2` | gzip support |
+| TUI | `ratatui` + `crossterm` | Interactive dashboard |
+| Config | `serde` + `serde_json` | JSON-only config files |
+| Errors | Custom `Error` enum | Typed errors mapped to exit codes |
+| Testing | `assert_cmd`, `predicates` | Integration testing |
 
-Rejected: Go (GC/allocation costs in hot parsing), C++ (safety/tooling), Python (throughput).
+Rejected: Go (GC/allocation costs), C++ (safety/tooling), Python (throughput).
+
+---
 
 ## Architecture (summary)
 
 ```
-read → decompress → split → parse → normalize → filter → format → write
-                                     │
-                                     └─ sort mode → index write → k-way merge → lazy read
+read → decompress → split → parse → normalize → filter → redact → alert → format → write
+                                                                │
+                                                                └─ sort mode → sort → write
 ```
 
-- Streaming, bounded memory; sorting is the only mode requiring disk.
-- On-disk index format and merge strategy: [DESIGN §5](docs/DESIGN.md#5-sorting--indexing), [ADR 0003](docs/adr/0003-index-for-sort.md).
-- Data model (`Entry`, `Value`, `Level`) and module map: [DESIGN §3–4](docs/DESIGN.md).
+- Streaming, bounded memory; sorting collects entries in memory.
+- Data model (`Entry`, `Level`, `Format`, `ExportFormat`, `RedactRules`) and module map: [DESIGN §2–3](docs/DESIGN.md).
+
+---
 
 ## Feature Scope
 
-### P0 — MVP
-- Files/stdin/multiple files; gzip/zstd/bzip2/xz by magic bytes; LF/CRLF/CR/NUL
-- JSON + logfmt + plain text; `--allow-prefix`
-- Timestamp normalization (RFC3339, Unix s/ms/µs/ns); level normalization
+### v0.2.0 — Current (implemented)
+
+- Files/stdin/multiple files; gzip by magic bytes; LF/CRLF/CR/NUL
+- JSON + logfmt + plain text + OTLP; `--allow-prefix`
+- Timestamp normalization (RFC3339, Unix s/ms/µs/ns); level normalization (incl. OTel SeverityNumber)
 - `-l` level threshold; `-f` field filters (6 operator forms + `?`); `--since/--until`
 - Formatted colorized output; `-h` hide/reveal; `-e`; `-x`; `-t`/`-Z`/`-L`
-- Pager integration; `--color`; `-r` raw; `-o` file
+- Multi-format export: formatted, raw, json, csv, prometheus
+- PII redaction via config `redact:` rules
+- Alert rules via config `alerts:` (threshold → exit code)
+- Config file auto-discovery + `--config` + env vars + CLI overrides
+- Interactive TUI with histogram, follow, details view
+- File follow mode (`-F`)
 - Clean exit codes and error messages
 
-### P1 — v1.0
-- `-q` boolean query language (full QUERY_SPEC)
-- `-s` sorted merge with disk index; `-F` follow mode with `--tail`
-- Config files + env vars; themes + overlays
-- Shell completions, man page
+### v0.3 — Planned
 
-### P2 — Post-1.0
+- zstd/bzip2/xz compression support (feature-gated)
+- On-disk index for sorting large inputs
+- Shell completions (`--shell-completions`)
+- Pager integration (`--paging`)
+- Theme engine (`--theme` with built-in themes)
+- OTLP receiver (localhost:4317 HTTP endpoint)
+- AI-assisted query helper (`--explain`)
+
+### v1.0 — Post-v0.3
+
 - Apache/Nginx and syslog parsers
-- `--output-format json|logfmt`, `--count-by`
-- `index` maintenance subcommands, `--ignore-case`, `--strict`
-- TUI mode (evaluate separately)
+- `--output-format json|logfmt` re-serialization
+- `--count-by` basic aggregations
+- `index` maintenance subcommands
+- `--ignore-case`, `--strict`
 
-Out of scope: dashboards/charts, remote shipping, web UI, plugins, alerting.
+Out of scope: dashboards/charts, remote shipping, web UI, plugins, alerting as a service.
+
+---
 
 ## Project Structure
 
@@ -124,15 +161,24 @@ logcli/
 │   ├── PARSING_SPEC.md  QUERY_SPEC.md  CONFIG.md  TEST_PLAN.md
 │   └── adr/0001..0004
 ├── src/
-│   ├── main.rs  cli.rs  app.rs  error.rs  model.rs
-│   ├── input.rs  parser.rs  filter.rs  output.rs
-│   └── (planned: query/, index/, theme/, config.rs)
-├── tests/cli.rs + fixtures/
-└── scripts/docker-cargo.{sh,ps1}
+│   ├── main.rs       entry point and exit-code mapping
+│   ├── cli.rs        clap flag surface
+│   ├── app.rs        pipeline wiring, config, time/size parsing, export, alerts
+│   ├── config.rs     declarative config, PII redaction, alert rules
+│   ├── error.rs      error types and exit codes
+│   ├── filter.rs     level/time/field filters and path resolution
+│   ├── input.rs      file/stdin sources, gzip, follow tailing
+│   ├── model.rs      Entry, Level, Format, ExportFormat, RedactRules
+│   ├── output.rs     formatting, colors, hiding, expansion, writers, CSV, Prometheus
+│   ├── parser.rs     JSON/logfmt/plain/OTLP detection and normalization
+│   ├── query/        lexer, parser, AST evaluator (-q engine)
+│   ├── tui/          interactive TUI dashboard (ratatui + crossterm)
+│   └── theme.rs      color theme constants
+├── tests/            integration tests and fixtures
+└── scripts/          Docker-based cargo wrappers, Windows cross-compile
 ```
 
-Planned modules from later phases (query engine, on-disk index, themes, config) will be added as
-submodules rather than growing the existing files past their current responsibilities.
+---
 
 ## Implementation Phases
 
@@ -140,65 +186,59 @@ submodules rather than growing the existing files past their current responsibil
 - [x] PRD, CLI spec, design, parsing spec, query spec, config spec, test plan
 - [x] ADRs 0001–0004
 - [x] README, CONTRIBUTING, CHANGELOG, docs index
-- [ ] Resolve PRD open questions (name, license, logfmt priority, `--sort` default)
 
-### Phase 1 — Foundation (Week 1) — done in MVP
+### Phase 1 — Foundation (done in MVP)
 - [x] `cargo init`; pin MSRV
-- [x] `cli.rs` with the full flag surface from CLI_SPEC (including `--help` output)
+- [x] `cli.rs` with the full flag surface from CLI_SPEC
 - [x] `model` types; input sources + gzip + delimiter detection
 - [x] JSON parser + `normalize` (timestamp/level/message)
 - [x] Minimal formatter; pipeline wiring in `app.rs`
-- **Exit:** `logcli fixture.jsonl` renders correctly; `logcli -l w` filters.
 
-### Phase 2 — Filtering (Week 2) — done in MVP
+### Phase 2 — Filtering (done in MVP)
 - [x] Level threshold and numeric mapping
 - [x] Field filters (all forms), hierarchical paths, absent modifier
 - [x] Timestamp parsing + `--since/--until` (absolute, keyword, relative)
 - [x] logfmt parser and format detection
 - [x] Error model and exit codes per CLI_SPEC
-- **Exit:** parsing and filter examples covered by tests.
-- [x] Add wildcard operators and the QUERY_SPEC §10 matrix as dedicated tests
 
-### Phase 3 — Query Language (v0.2 — completed)
+### Phase 3 — Query Language (done in v0.2)
 - [x] Lexer, parser (EBNF in QUERY_SPEC), AST
 - [x] Evaluator with coercion rules, arrays, `in`, `exists`, absent modifier `?`, value sets (`@file`, `@-`)
 - [x] Caret-positioned error messages
-- [x] Cost-based term ordering; regex compilation
-- [x] QUERY_SPEC test matrix and unit tests green (27 new integration tests)
-- **Exit:** QUERY_SPEC §10 examples and test matrix pass.
+- [x] QUERY_SPEC test matrix and unit tests green
 
-### Phase 3.5 — Interactive TUI (completed)
+### Phase 3.5 — Interactive TUI (done in v0.2)
 - [x] TUI scaffolding (ratatui + crossterm)
 - [x] Log list view with color-coded levels
-- [x] Scrollable entry list (j/k, g/G)
-- [x] Query filter prompt (/ or f)
-- [x] Details view (d/Enter)
-- [x] Follow mode toggle (F) with live file re-reading
-- [x] Help screen (?)
-- [x] 11 TUI unit tests
-- **Exit:** `--tui` launches and operates correctly; all unit tests pass.
+- [x] Scrollable entry list, query filter, details view, follow toggle, help, histogram
+- [x] Auto-launch when no files + stdin is TTY
 
-### Phase 4 — Output & UX (Week 4)
-- [ ] Theme engine (`@base` + overlays), built-in themes
-- [ ] Expansion modes, hiding, flattening, empty-field rules
-- [ ] Pager integration, TTY detection, `NO_COLOR`, broken-pipe handling
-- [ ] Config loading with precedence
-- **Exit:** CLI_SPEC output tests and snapshots green on all platforms.
+### Phase 4 — Next-Level Features (done in v0.2)
+- [x] Declarative config files (JSON-only)
+- [x] PII redaction rules (`redact:` in config)
+- [x] Alert rules (`alerts:` in config with threshold + exit code)
+- [x] Multi-format export (json, csv, prometheus)
+- [x] OpenTelemetry OTLP parsing (`--input-format otel`)
+- [x] File follow mode (`-F`)
+- [x] Native Windows `logcli.exe` cross-compiled and installed
 
-### Phase 5 — Sorting & Follow (Week 5)
-- [ ] Index format (write/read/validate), `--dump-index`
-- [ ] K-way merge; index-only level/time filtering fast path
-- [ ] Incremental reindex; cache dir management
-- [ ] `-F`, `--tail`, `--sync-interval-ms`, stdin follow
-- **Exit:** sort/follow tests in TEST_PLAN §4.4 green; benchmarks within budget.
+### Phase 5 — v0.3 (planned)
+- [ ] zstd/bzip2/xz compression support
+- [ ] On-disk index for sorting
+- [ ] Shell completions
+- [ ] Pager integration
+- [ ] Theme engine
+- [ ] OTLP receiver (localhost:4317)
+- [ ] AI-assisted query helper
 
-### Phase 6 — Hardening & Release (Week 6)
+### Phase 6 — Hardening & Release (planned)
 - [ ] Fuzzing (parsers + query) for 24h clean
 - [ ] Performance tuning against budgets; publish results
 - [ ] Cross-platform CI, coverage ≥ 85%
 - [ ] README/docs final pass; completions + man page
 - [ ] Release binaries, checksums, v1.0.0 tag
-- **Exit:** TEST_PLAN §10 release checklist complete.
+
+---
 
 ## Testing & Quality Gates
 
@@ -210,29 +250,24 @@ See [TEST_PLAN.md](docs/TEST_PLAN.md). Merge requires:
 - No benchmark regression > 10%
 - Doc updates when behavior changes
 
+---
+
 ## Performance Budgets
 
 | Scenario | Target |
 |---|---|
 | 2.3 GiB JSON, parse+format to NUL | ≤ 2 s |
 | Peak RSS (no sort) | ≤ 200 MiB |
-| Index build | ≥ 500 MiB/s |
-| Sorted merge (warm index) | ≥ 300 MiB/s |
-| Startup (`--version`) | < 50 ms |
+| Startup (`--version`) | < 100 ms |
 | Binary size (stripped) | < 15 MiB |
+
+---
 
 ## Immediate Next Steps
 
-1. Replace in-memory `-s` with the on-disk index and k-way merge (ADR 0003).
-2. Implement `-F` follow mode with `--tail`.
-3. Add theme engine and pager integration.
-4. Add zstd/bzip2/xz support behind feature flags.
+1. Implement zstd/bzip2/xz compression support.
+2. Implement on-disk index for sorting large inputs.
+3. Implement shell completions and pager integration.
+4. Implement theme engine with built-in themes.
 5. Add CI workflow with fmt/clippy/test on three platforms.
-6. Resolve remaining PRD open questions (name, license, logfmt priority, `--sort` default).
-
-## Reference Material
-
-- [hl source](https://github.com/pamburus/hl) — architecture and performance techniques
-- [hl README](https://github.com/pamburus/hl#readme) — feature/flag inventory
-- [Keep a Changelog](https://keepachangelog.com/) — changelog format
-- [ADR guidance](https://adr.github.io/) — decision record structure
+6. Resolve remaining PRD open questions (name, license).

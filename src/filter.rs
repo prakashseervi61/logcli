@@ -86,6 +86,7 @@ mod tests {
             consumed: Vec::new(),
             raw: String::new(),
             format: Format::Json,
+            redacted: false,
         }
     }
 

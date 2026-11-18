@@ -4,6 +4,7 @@ pub use app::TuiApp;
 
 use crate::app::load_entries;
 use crate::cli::Args;
+use crate::config::Config;
 use crate::error::Error;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -13,16 +14,14 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
-pub fn run(args: Args) -> Result<(), Error> {
+pub fn run(args: Args, config: Option<&Config>) -> Result<(), Error> {
     let entries = if args.files.is_empty() {
-        // No files given: start with an empty TUI. The user can still filter,
-        // but there's nothing to display until files are loaded (future feature).
         Vec::new()
     } else {
         load_entries(&args)?
     };
 
-    let mut app = TuiApp::new(entries, args);
+    let mut app = TuiApp::new(entries, args, config.cloned());
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
